@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gold-crypto-quant"
+version = "0.1.0"
+description = "Paper-trading research system for crypto futures and XAU/USD."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28,<1",
+    "numpy>=2.3,<3",
+    "pandas>=2.3,<4",
+    "pydantic-settings>=2.14,<3",
+    "pymysql[rsa]>=1.2,<2",
+    "sqlalchemy>=2.0,<3",
+    "vectorbt>=1.1,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<10", "ruff>=0.12,<1"]
+
+[project.scripts]
+gold-crypto-quant = "gold_crypto_quant.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gold_crypto_quant"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
