@@ -771,3 +771,41 @@ class PaperSimulationState(Base):
         DateTime(fsp=6), nullable=False, server_default=CREATED_AT,
         onupdate=datetime.utcnow, comment="监督状态最后更新时间UTC"
     )
+
+
+class EmailDeliveryLog(Base):
+    """状态邮件每次发送尝试的审计记录，不保存正文和认证信息。"""
+
+    __tablename__ = "email_delivery_logs"
+    __table_args__ = (
+        Index("ix_email_delivery_attempted_at", "attempted_at"),
+        {"comment": "状态邮件发送审计，仅记录收件人、标题、结果和失败原因"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="邮件发送审计主键ID"
+    )
+    channel: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="发送渠道，当前固定为SMTP"
+    )
+    recipient: Mapped[str] = mapped_column(
+        String(254), nullable=False, comment="状态报告收件邮箱"
+    )
+    subject: Mapped[str] = mapped_column(
+        String(255), nullable=False, comment="状态报告邮件标题"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="发送结果SENT或FAILED"
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="发送失败的脱敏错误摘要"
+    )
+    attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, comment="发送尝试时间UTC"
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(fsp=6), nullable=True, comment="成功发送时间UTC"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="审计记录创建时间UTC"
+    )

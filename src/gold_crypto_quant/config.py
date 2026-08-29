@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     # 策略累计回撤达到 8% 后触发总熔断。
     max_drawdown_limit: float = Field(default=0.08, gt=0, le=0.25)
 
+    # 使用Mac邮件发送运行摘要；留空时完全禁用邮件功能。
+    status_email_to: str | None = None
+    # 当前只允许固定四小时汇报，Field约束防止误配造成高频邮件。
+    status_email_interval_hours: int = Field(default=4, ge=1, le=24)
+    # SMTP配置使用独立授权码，不允许复用邮箱网页登录密码。
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None
+
     # Gate 测试网与实盘使用不同密钥，SecretStr 可防止日志意外打印完整密钥。
     gate_testnet_api_key: SecretStr | None = None
     gate_testnet_api_secret: SecretStr | None = None
@@ -51,6 +62,10 @@ class Settings(BaseSettings):
         """硬性禁止实盘开关，防止配置错误导致真实下单。"""
         if self.live_trading:
             raise ValueError("LIVE_TRADING must remain false during the paper-trading phase")
+        if self.status_email_to and not all(
+            (self.smtp_host, self.smtp_username, self.smtp_password, self.smtp_from)
+        ):
+            raise ValueError("SMTP settings are required when status email is enabled")
         return self
 
 

@@ -9,9 +9,12 @@ from gold_crypto_quant.backtest.ema_vectorbt import (
 from gold_crypto_quant.backtest.research import (
     HoldoutResearchResult,
     InsufficientResearchData,
+    JointBreakoutFoldResult,
+    JointBreakoutResearchResult,
     RollingFoldResult,
     RollingResearchResult,
     run_holdout_research,
+    run_joint_breakout_research,
     run_rolling_research,
 )
 
@@ -22,9 +25,12 @@ __all__ = [
     "diagnose_trades",
     "HoldoutResearchResult",
     "InsufficientResearchData",
+    "JointBreakoutFoldResult",
+    "JointBreakoutResearchResult",
     "RollingFoldResult",
     "RollingResearchResult",
     "run_holdout_research",
+    "run_joint_breakout_research",
     "run_rolling_research",
     "run_ema_backtest",
 ]

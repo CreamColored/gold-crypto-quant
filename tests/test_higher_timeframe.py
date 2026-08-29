@@ -38,3 +38,15 @@ def test_ema12_alignment_waits_for_completed_confirmation_bar() -> None:
 
     assert not result.loc[pd.Timestamp("2025-01-01 01:45:00Z"), "higher_long_allowed"]
     assert result.loc[pd.Timestamp("2025-01-01 02:00:00Z"), "higher_long_allowed"]
+
+
+def test_macro_filter_waits_for_completed_four_hour_bar() -> None:
+    """30分钟策略的宏观方向只能读取已经完整结束的4小时K线。"""
+    index = pd.date_range("2025-01-01", periods=24, freq="30min", tz="UTC")
+    bars = pd.DataFrame({"close": np.arange(100.0, 124.0)}, index=index)
+
+    # 调用宏观过滤并缩短EMA周期；第二根完整4小时K线在08:00才形成EMA值。
+    result = build_higher_timeframe_filter(bars, "30m", ema_period=2, mode="macro")
+
+    assert not result.loc[pd.Timestamp("2025-01-01 07:30:00Z"), "higher_long_allowed"]
+    assert result.loc[pd.Timestamp("2025-01-01 08:00:00Z"), "higher_long_allowed"]

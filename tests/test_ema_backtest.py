@@ -76,6 +76,58 @@ def test_run_ema_backtest_requires_enough_bars() -> None:
         run_ema_backtest(make_bars(100), symbol="ETH_USDT", interval="5m")
 
 
+def test_atr_take_profit_closes_trade_at_intrabar_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启用ATR止盈后，最高价触及目标的K线应完成平仓。"""
+    bars = make_bars()
+    bars.loc[:, ["open", "high", "low", "close"]] = [100.0, 101.0, 99.0, 100.0]
+    bars.loc[bars.index[202], "high"] = 110.0
+    signals = pd.DataFrame(
+        False,
+        index=bars.index,
+        columns=["long_entry", "long_exit", "short_entry", "short_exit"],
+    )
+    signals["close"] = 100.0
+    signals["ema_fast"] = 101.0
+    signals["ema_slow"] = 100.0
+    signals["ema_trend"] = 99.0
+    signals.loc[bars.index[201], "long_entry"] = True
+    # 替换信号生成方法，使测试只验证vectorbt的ATR止盈执行。
+    monkeypatch.setattr(ema_vectorbt, "generate_ema_signals", lambda _bars, _strategy: signals)
+
+    # 调用正式回测；进场ATR约2，2ATR止盈目标约104，应在下一根最高价触及时退出。
+    result, portfolio = run_ema_backtest(
+        bars,
+        symbol="BTC_USDT",
+        interval="5m",
+        config=EmaBacktestConfig(take_profit_atr_multiple=2.0),
+    )
+
+    trade = portfolio.trades.records_readable.iloc[0]
+    assert result.trade_count == 1
+    assert trade["Exit Timestamp"] == bars.index[202]
+    assert result.total_return > 0
+
+
+def test_trailing_stop_rejects_cooldown_combination() -> None:
+    """移动止损无法按原固定止损识别冷却起点时必须失败关闭。"""
+    with pytest.raises(ValueError, match="cannot be combined"):
+        # 调用正式回测并传入不兼容组合，防止研究结果错误套用固定止损冷却逻辑。
+        run_ema_backtest(
+            make_bars(),
+            symbol="BTC_USDT",
+            interval="5m",
+            strategy=EmaTrendParameters(
+                fast_period=5,
+                slow_period=10,
+                trend_period=20,
+                cooldown_bars=5,
+            ),
+            config=EmaBacktestConfig(trailing_stop=True),
+        )
+
+
 def test_detect_daily_fuse_uses_previous_day_close_as_baseline() -> None:
     """每日亏损应按UTC日界线和前一日收盘权益计算。"""
     index = pd.to_datetime(["2025-01-01 23:55:00Z", "2025-01-02 00:00:00Z", "2025-01-02 00:05:00Z"])

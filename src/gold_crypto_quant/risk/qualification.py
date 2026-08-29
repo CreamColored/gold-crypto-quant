@@ -104,6 +104,9 @@ def evaluate_rolling_research(
                     "min_trend_strength": selection.min_trend_strength,
                     "min_adx": selection.min_adx,
                     "higher_timeframe_filter": selection.use_higher_timeframe_filter,
+                    "higher_timeframe_mode": getattr(
+                        selection, "higher_timeframe_mode", "standard"
+                    ),
                     "trend_slope_lookback": selection.trend_slope_lookback,
                     "cooldown_bars": selection.cooldown_bars,
                 },

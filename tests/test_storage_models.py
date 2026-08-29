@@ -9,6 +9,7 @@ def test_core_table_names_are_registered() -> None:
 
     assert set(Base.metadata.tables) == {
         "account_snapshots",
+        "email_delivery_logs",
         "instruments",
         "market_bars",
         "market_data_health_states",

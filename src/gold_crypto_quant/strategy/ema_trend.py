@@ -17,6 +17,7 @@ class EmaTrendParameters:
     allow_short: bool = True
     min_adx: float = 0.0
     use_higher_timeframe_filter: bool = False
+    higher_timeframe_mode: str = "standard"
     trend_slope_lookback: int = 0
     cooldown_bars: int = 0
     entry_mode: str = "cross"
@@ -39,9 +40,14 @@ class EmaTrendParameters:
             raise ValueError("cooldown_bars must be in [0, 100]")
         if not 0 <= self.trend_slope_lookback <= 100:
             raise ValueError("trend_slope_lookback must be in [0, 100]")
-        if self.entry_mode not in {"cross", "pullback", "ema12_pullback"}:
+        if self.higher_timeframe_mode not in {"standard", "macro"}:
+            raise ValueError("higher_timeframe_mode must be 'standard' or 'macro'")
+        if self.entry_mode not in {"cross", "pullback", "ema12_pullback", "breakout"}:
             raise ValueError("unsupported entry_mode")
-        if not 1 <= self.pullback_lookback <= 20:
+        if self.entry_mode == "breakout":
+            if not 2 <= self.pullback_lookback <= 200:
+                raise ValueError("breakout lookback must be in [2, 200]")
+        elif not 1 <= self.pullback_lookback <= 20:
             raise ValueError("pullback_lookback must be in [1, 20]")
         if not 1 <= self.pullback_slope_lookback <= 20:
             raise ValueError("pullback_slope_lookback must be in [1, 20]")
@@ -140,7 +146,7 @@ def generate_ema_signals(
         short_recovery = (close < fast) & (close.shift(1) >= fast.shift(1)) & (close < open_price)
         raw_long_entry = long_alignment & recent_long_touch & long_recovery
         raw_short_entry = short_alignment & recent_short_touch & short_recovery
-    else:
+    elif parameters.entry_mode == "ema12_pullback":
         required_pullback_columns = {"open", "high", "low"}
         missing_pullback_columns = required_pullback_columns - set(bars.columns)
         if missing_pullback_columns:
@@ -193,6 +199,26 @@ def generate_ema_signals(
         raw_short_entry = (
             short_alignment & recent_short_touch & short_departure & (close < open_price)
         )
+    else:
+        required_breakout_columns = {"high", "low"}
+        missing_breakout_columns = required_breakout_columns - set(bars.columns)
+        if missing_breakout_columns:
+            raise ValueError(
+                f"breakout bars missing required columns: {sorted(missing_breakout_columns)}"
+            )
+        high = pd.to_numeric(bars["high"], errors="raise").astype(float)
+        low = pd.to_numeric(bars["low"], errors="raise").astype(float)
+        # pullback_lookback在旧数据库参数结构中是通用“入场观察窗口”；突破模式复用该字段，
+        # 避免增加无法由现有准入和部署代码完整恢复的新参数。
+        lookback = parameters.pullback_lookback
+        # 先shift再rolling，确保本根最高/最低价没有参与它自己需要突破的历史区间。
+        previous_high = high.shift(1).rolling(lookback, min_periods=lookback).max()
+        previous_low = low.shift(1).rolling(lookback, min_periods=lookback).min()
+        long_alignment = (fast > slow) & (close > trend)
+        short_alignment = (fast < slow) & (close < trend)
+        # 只有收盘真正越过此前区间才确认突破，随后仍统一在下一根K线开盘执行。
+        raw_long_entry = long_alignment & (close > previous_high)
+        raw_short_entry = short_alignment & (close < previous_low)
 
     if parameters.trend_slope_lookback > 0:
         # 与若干根之前的EMA200比较，要求大趋势已经持续转向，而非只看本根瞬时变化。

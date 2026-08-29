@@ -9,6 +9,13 @@ HIGHER_TIMEFRAME_RULES = {
     "1h": ("4h", 4),
 }
 
+MACRO_HIGHER_TIMEFRAME_RULES = {
+    "5m": ("4h", 48),
+    "15m": ("4h", 16),
+    "30m": ("4h", 8),
+    "1h": ("1D", 24),
+}
+
 EMA12_CONFIRMATION_RULES = {
     "15m": ("30min", 2),
     "30m": ("1h", 2),
@@ -20,16 +27,20 @@ def build_higher_timeframe_filter(
     interval: str,
     *,
     ema_period: int = 200,
+    mode: str = "standard",
 ) -> pd.DataFrame:
     """返回与低周期索引对齐的高周期多空许可布尔列。"""
-    if interval not in HIGHER_TIMEFRAME_RULES:
+    if mode not in {"standard", "macro"}:
+        raise ValueError("higher-timeframe mode must be 'standard' or 'macro'")
+    rules = HIGHER_TIMEFRAME_RULES if mode == "standard" else MACRO_HIGHER_TIMEFRAME_RULES
+    if interval not in rules:
         raise ValueError(f"unsupported higher-timeframe interval: {interval}")
     if ema_period < 2:
         raise ValueError("ema_period must be at least 2")
     if "close" not in bars.columns:
         raise ValueError("bars must contain a 'close' column")
 
-    higher_frequency, expected_count = HIGHER_TIMEFRAME_RULES[interval]
+    higher_frequency, expected_count = rules[interval]
     close = pd.to_numeric(bars["close"], errors="raise").astype(float)
     # 开盘时间属于左闭右开区间；标签放在右端，只有高周期完整结束后才能被低周期读取。
     resampler = close.resample(higher_frequency, closed="left", label="right")

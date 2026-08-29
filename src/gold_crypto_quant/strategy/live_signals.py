@@ -122,6 +122,7 @@ def evaluate_next_bar_signal(
             combined,
             interval,
             ema_period=parameters.trend_period,
+            mode=parameters.higher_timeframe_mode,
         )
         higher_long_allowed = bool(higher_filter.iloc[-1]["higher_long_allowed"])
         higher_short_allowed = bool(higher_filter.iloc[-1]["higher_short_allowed"])
@@ -161,6 +162,7 @@ def evaluate_next_bar_signal(
             "higher_long_allowed": higher_long_allowed,
             "higher_short_allowed": higher_short_allowed,
             "entry_mode": parameters.entry_mode,
+            "higher_timeframe_mode": parameters.higher_timeframe_mode,
             # 保存斜率观察窗口，便于模拟交易信号与批准参数逐笔审计核对。
             "trend_slope_lookback": parameters.trend_slope_lookback,
         },

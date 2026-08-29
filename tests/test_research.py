@@ -4,12 +4,14 @@ from dataclasses import replace
 
 import pytest
 
-from gold_crypto_quant.backtest.ema_vectorbt import EmaBacktestResult
+from gold_crypto_quant.backtest.ema_vectorbt import EmaBacktestConfig, EmaBacktestResult
 from gold_crypto_quant.backtest.research import (
     _build_rolling_boundaries,
     _compound_returns,
+    _minimum_warmup_bars,
     _research_score,
 )
+from gold_crypto_quant.strategy import EmaTrendParameters
 
 
 def make_result(*, trades: int, total_return: float, drawdown: float) -> EmaBacktestResult:
@@ -62,3 +64,34 @@ def test_compound_returns_uses_continuous_capital() -> None:
     """滚动窗口收益必须复合，不能直接相加。"""
     # 调用复合收益方法，先涨10%再跌10%的结果应为-1%。
     assert _compound_returns([0.1, -0.1]) == pytest.approx(-0.01)
+
+
+def test_higher_timeframe_warmup_counts_underlying_bars() -> None:
+    """30分钟策略计算1小时EMA200时必须预热至少两倍低周期K线。"""
+    strategy = EmaTrendParameters()
+    config = EmaBacktestConfig()
+
+    # 分别调用普通和高周期预热计算，确认高周期EMA不会只获得约一半所需样本。
+    ordinary = _minimum_warmup_bars(
+        strategy,
+        config,
+        "30m",
+        use_higher_timeframe_filter=False,
+    )
+    higher = _minimum_warmup_bars(
+        strategy,
+        config,
+        "30m",
+        use_higher_timeframe_filter=True,
+    )
+
+    assert ordinary == 216
+    assert higher == 418
+
+    macro = _minimum_warmup_bars(
+        EmaTrendParameters(higher_timeframe_mode="macro"),
+        config,
+        "30m",
+        use_higher_timeframe_filter=True,
+    )
+    assert macro == 1624

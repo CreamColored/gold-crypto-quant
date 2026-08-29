@@ -31,6 +31,8 @@ class EmaBacktestConfig:
     risk_per_trade: float = 0.0025
     atr_period: int = 14
     atr_multiple: float = 1.5
+    take_profit_atr_multiple: float = 0.0
+    trailing_stop: bool = False
     fee_rate: float = 0.0005
     slippage_rate: float = 0.0002
     daily_loss_limit: float = 0.02
@@ -45,6 +47,8 @@ class EmaBacktestConfig:
             raise ValueError("risk_per_trade must be in (0, 0.02]")
         if self.atr_period < 2 or self.atr_multiple <= 0:
             raise ValueError("ATR settings must be positive")
+        if not 0 <= self.take_profit_atr_multiple <= 20:
+            raise ValueError("take_profit_atr_multiple must be in [0, 20]")
         if self.fee_rate < 0 or self.slippage_rate < 0:
             raise ValueError("trading costs cannot be negative")
         if not 0 < self.daily_loss_limit <= 0.1:
@@ -101,8 +105,16 @@ def _build_portfolio(
     long_exits = signals["long_exit"] | risk_exit
     short_exits = signals["short_exit"] | risk_exit
     simulation_buying_power = config.initial_equity * config.leverage_limit
+    if config.take_profit_atr_multiple > 0:
+        # 止盈与止损使用同一根已收盘K线的ATR；按倍数比例换算可避免重复计算波动率。
+        take_profit_fraction: pd.Series | float = (
+            stop_fraction * config.take_profit_atr_multiple / config.atr_multiple
+        )
+    else:
+        # vectorbt使用NaN表示不启用固定止盈；默认行为与原回测完全一致。
+        take_profit_fraction = float("nan")
 
-    # 调用vectorbt执行多空信号、手续费、滑点和ATR止损模拟。
+    # 调用vectorbt执行多空信号、手续费、滑点、ATR止损、可选止盈和移动止损模拟。
     return vbt.Portfolio.from_signals(
         close=bars["close"],
         entries=long_entries,
@@ -116,6 +128,8 @@ def _build_portfolio(
         high=bars["high"],
         low=bars["low"],
         sl_stop=stop_fraction,
+        sl_trail=config.trailing_stop,
+        tp_stop=take_profit_fraction,
         stop_entry_price="price",
         stop_exit_price="stopmarket",
         upon_opposite_entry="reversereduce",
@@ -289,6 +303,8 @@ def run_ema_backtest(
         raise ValueError("not enough bars to warm up the trend EMA")
     if interval not in PANDAS_FREQUENCIES:
         raise ValueError(f"unsupported backtest interval: {interval}")
+    if config.trailing_stop and strategy.cooldown_bars > 0:
+        raise ValueError("trailing stop cannot be combined with ATR stop cooldown")
 
     # generate_ema_signals已把收盘确认信号移动到下一根K线，因此price使用该根开盘价。
     signals = generate_ema_signals(bars, strategy)
@@ -318,7 +334,11 @@ def run_ema_backtest(
                 trend_period=strategy.trend_period,
             )
         else:
-            higher_filter = build_higher_timeframe_filter(bars, interval)
+            higher_filter = build_higher_timeframe_filter(
+                bars,
+                interval,
+                mode=strategy.higher_timeframe_mode,
+            )
         signals["long_entry"] &= higher_filter["higher_long_allowed"]
         signals["short_entry"] &= higher_filter["higher_short_allowed"]
     if not strategy.allow_long:

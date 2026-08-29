@@ -4,9 +4,11 @@
 """
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from gold_crypto_quant.backtest import (
     EmaBacktestConfig,
@@ -14,6 +16,7 @@ from gold_crypto_quant.backtest import (
     diagnose_trades,
     run_ema_backtest,
     run_holdout_research,
+    run_joint_breakout_research,
     run_rolling_research,
 )
 from gold_crypto_quant.config import Settings, get_settings
@@ -27,6 +30,7 @@ from gold_crypto_quant.exchanges.oanda import (
 from gold_crypto_quant.market_data import import_gate_history, import_oanda_history
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.market_data.oanda_history import OANDA_PRACTICE_VENUE
+from gold_crypto_quant.notifications import build_gate_status_email, send_smtp_email
 from gold_crypto_quant.risk.qualification import evaluate_rolling_research
 from gold_crypto_quant.runtime import (
     MARKET_DATA_SERVICE_NAME,
@@ -44,6 +48,7 @@ from gold_crypto_quant.storage import (
     create_schema,
     sync_schema_comments,
 )
+from gold_crypto_quant.storage.email_delivery import save_email_delivery
 from gold_crypto_quant.storage.execution_status import read_execution_safety_status
 from gold_crypto_quant.storage.market_bars import load_market_bars
 from gold_crypto_quant.storage.market_health import refresh_market_health
@@ -72,6 +77,14 @@ from gold_crypto_quant.strategy import EmaTrendParameters
 def _venue_for_symbol(symbol: str) -> str:
     """根据第一阶段唯一品种代码选择测试交易场所。"""
     return OANDA_PRACTICE_VENUE if symbol == "XAU_USD" else GATE_TESTNET_VENUE
+
+
+def _runtime_log(message: str) -> None:
+    """为长期运行服务输出带本机时区的可读时间戳。"""
+    # 调用系统本地时区转换，Mac与后续Ubuntu部署都无需硬编码Asia/Shanghai。
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    # 调用立即刷新，确保终端或重定向日志在进程异常时仍保留最后一条完整记录。
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 def _read_oanda_practice_account(
@@ -111,7 +124,13 @@ def main() -> None:
             "walkforward-pullback",
             "walkforward-regime",
             "walkforward-ema12",
+            "walkforward-breakout",
+            "walkforward-joint-breakout",
+            "walkforward-joint-exits",
+            "walkforward-joint-regime",
+            "walkforward-joint-macro",
             "qualify-ema",
+            "qualify-breakout-fixed",
             "execution-safety",
             "system-readiness",
             "risk-snapshot",
@@ -596,6 +615,151 @@ def main() -> None:
                 )
         print("研究模式完成：未写入策略准入，未创建订单，LIVE_TRADING=false")
         return
+    if args.command == "walkforward-breakout":
+        # 突破研究只替换入场条件，继续复用EMA趋势方向、ATR仓位、成本和两级熔断。
+        breakout_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        breakout_strategy = EmaTrendParameters(
+            entry_mode="breakout",
+            pullback_lookback=20,
+        )
+        for contract in args.contracts:
+            for interval in args.intervals:
+                # 调用标准行情读取方法，历史区间完整性仍由统一存储层检查。
+                bars = load_market_bars(
+                    contract, interval, venue=_venue_for_symbol(contract)
+                )
+                try:
+                    # 调用三折滚动研究，仅比较10/20/40根突破窗口和三档ATR止损。
+                    # 方向固定both，确保最终策略始终符合BTC和ETH多空都做的核心规则。
+                    rolling = run_rolling_research(
+                        bars,
+                        symbol=contract,
+                        interval=interval,
+                        trend_strengths=(0.0,),
+                        atr_multiples=(1.5, 2.0, 2.5),
+                        directions=("both",),
+                        entry_variants=(
+                            ("breakout", 10),
+                            ("breakout", 20),
+                            ("breakout", 40),
+                        ),
+                        base_strategy=breakout_strategy,
+                        base_config=breakout_config,
+                    )
+                except InsufficientResearchData as exc:
+                    print(f"{contract} {interval}: 样本不足，{exc}")
+                    continue
+                candidate_count = rolling.folds[0].research.candidate_count
+                print(f"{contract} {interval}: breakout_candidates={candidate_count}")
+                for fold in rolling.folds:
+                    research = fold.research
+                    selected = research.selected_test_result
+                    print(
+                        f"  Fold {fold.fold}: lookback={research.pullback_lookback}, "
+                        f"ATR={research.atr_multiple:.1f}, "
+                        f"return={selected.total_return:.2%}, "
+                        f"DD={selected.max_drawdown:.2%}, trades={selected.trade_count}"
+                    )
+                stable = "一致" if rolling.stable_parameter_set else "不一致"
+                print(
+                    f"  样本外汇总: baseline={rolling.baseline_compounded_return:.2%}, "
+                    f"selected={rolling.selected_compounded_return:.2%}, "
+                    f"最差DD={rolling.selected_worst_drawdown:.2%}, "
+                    f"盈利窗口={rolling.selected_positive_folds}/{len(rolling.folds)}, "
+                    f"参数稳定性={stable}"
+                )
+        print("研究模式完成：未写入策略准入，未创建订单，LIVE_TRADING=false")
+        return
+    if args.command in {
+        "walkforward-joint-breakout",
+        "walkforward-joint-exits",
+        "walkforward-joint-regime",
+        "walkforward-joint-macro",
+    }:
+        if len(args.contracts) < 2:
+            raise ValueError("共同突破研究至少需要BTC和ETH两个品种")
+        joint_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        research_exits = args.command == "walkforward-joint-exits"
+        research_regime = args.command in {
+            "walkforward-joint-regime",
+            "walkforward-joint-macro",
+        }
+        research_macro = args.command == "walkforward-joint-macro"
+        for interval in args.intervals:
+            bars_by_symbol = {}
+            for contract in args.contracts:
+                # 为同一周期调用标准行情读取方法，两个品种仍保留各自完整的时间顺序。
+                bars_by_symbol[contract] = load_market_bars(
+                    contract, interval, venue=_venue_for_symbol(contract)
+                )
+            try:
+                # 调用共同选参研究；训练得分取所有品种中最差者，防止牺牲ETH换取BTC收益。
+                joint = run_joint_breakout_research(
+                    bars_by_symbol,
+                    interval=interval,
+                    lookbacks=(20, 40)
+                    if research_exits or research_regime
+                    else (10, 20, 40),
+                    atr_multiples=(1.5, 2.0, 2.5),
+                    take_profit_atr_multiples=(0.0, 2.0, 3.0) if research_exits else (0.0,),
+                    trailing_options=(False, True) if research_exits else (False,),
+                    adx_thresholds=(20.0, 25.0) if research_regime else (0.0,),
+                    higher_timeframe_filters=(True,) if research_regime else (False,),
+                    trend_slope_lookbacks=(5, 10) if research_regime else (0,),
+                    base_strategy=EmaTrendParameters(
+                        entry_mode="breakout",
+                        pullback_lookback=20,
+                        higher_timeframe_mode="macro" if research_macro else "standard",
+                    ),
+                    base_config=joint_config,
+                )
+            except InsufficientResearchData as exc:
+                print(f"{interval}: 共同样本不足，{exc}")
+                continue
+            print(
+                f"{interval}: joint_breakout_candidates={joint.candidate_count}, "
+                f"symbols={','.join(joint.symbols)}"
+            )
+            for fold in joint.folds:
+                details = ", ".join(
+                    f"{symbol}={fold.test_results[symbol].total_return:.2%}/"
+                    f"DD {fold.test_results[symbol].max_drawdown:.2%}/"
+                    f"{fold.test_results[symbol].trade_count}笔"
+                    for symbol in joint.symbols
+                )
+                print(
+                    f"  Fold {fold.fold}: lookback={fold.lookback}, "
+                    f"止损ATR={fold.atr_multiple:.1f}, "
+                    f"止盈ATR={fold.take_profit_atr_multiple:.1f}, "
+                    f"移动止损={'on' if fold.trailing_stop else 'off'}, {details}"
+                )
+                if research_regime:
+                    print(
+                        f"    市场状态: ADX>={fold.min_adx:.0f}, "
+                        f"高周期={'on' if fold.use_higher_timeframe_filter else 'off'}, "
+                        f"层级={fold.higher_timeframe_mode}, "
+                        f"EMA200斜率回看={fold.trend_slope_lookback}"
+                    )
+            stable = "一致" if joint.stable_parameter_set else "不一致"
+            for symbol in joint.symbols:
+                minimum_trades = min(
+                    fold.test_results[symbol].trade_count for fold in joint.folds
+                )
+                passed = (
+                    joint.compounded_returns[symbol] > 0
+                    and joint.worst_drawdowns[symbol] < joint_config.max_drawdown_limit
+                    and joint.positive_folds[symbol] >= 2
+                    and minimum_trades >= 8
+                )
+                print(
+                    f"  {symbol}汇总: return={joint.compounded_returns[symbol]:.2%}, "
+                    f"最差DD={joint.worst_drawdowns[symbol]:.2%}, "
+                    f"盈利窗口={joint.positive_folds[symbol]}/{len(joint.folds)}, "
+                    f"最少交易={minimum_trades}, 准入={'通过' if passed else '拒绝'}"
+                )
+            print(f"  共同参数稳定性={stable}")
+        print("共同研究完成：未写入策略准入，未创建订单，LIVE_TRADING=false")
+        return
     if args.command == "qualify-ema":
         # 调用幂等建表，确保首次运行时准入审计表已经存在且带有中文字段说明。
         create_schema()
@@ -633,6 +797,68 @@ def main() -> None:
                     f"min_trades={decision.minimum_fold_trades}"
                 )
                 print(f"  原因: {decision.reason}")
+        return
+    if args.command == "qualify-breakout-fixed":
+        # 固定参数来自200天历史上的共同稳定性审计；准入时不再允许按验证结果选参。
+        create_schema()
+        fixed_strategy = EmaTrendParameters(
+            entry_mode="breakout",
+            pullback_lookback=20,
+            min_adx=25.0,
+            use_higher_timeframe_filter=True,
+            higher_timeframe_mode="standard",
+            trend_slope_lookback=5,
+        )
+        fixed_config = EmaBacktestConfig(
+            initial_equity=args.initial_equity,
+            atr_multiple=1.5,
+        )
+        for contract in args.contracts:
+            for interval in args.intervals:
+                if interval != "30m":
+                    print(f"{contract} {interval}: 跳过，固定突破策略只批准30m")
+                    continue
+                venue = _venue_for_symbol(contract)
+                # 调用完整历史读取，确保正式准入与共同研究使用同一份连续已收盘K线。
+                bars = load_market_bars(contract, interval, venue=venue)
+                try:
+                    # 每折只提供一个固定候选；训练或验证结果都不能改变任何策略参数。
+                    rolling = run_rolling_research(
+                        bars,
+                        symbol=contract,
+                        interval=interval,
+                        trend_strengths=(0.0,),
+                        atr_multiples=(1.5,),
+                        directions=("both",),
+                        adx_thresholds=(25.0,),
+                        higher_timeframe_filters=(True,),
+                        trend_slope_lookbacks=(5,),
+                        cooldown_options=(0,),
+                        entry_variants=(("breakout", 20),),
+                        base_strategy=fixed_strategy,
+                        base_config=fixed_config,
+                    )
+                except InsufficientResearchData as exc:
+                    print(f"{contract} {interval}: REJECTED（样本不足：{exc}）")
+                    continue
+                # 调用统一硬门禁，收益、回撤、盈利窗口或交易数任一失败都会拒绝。
+                decision = evaluate_rolling_research(
+                    rolling,
+                    strategy_name="EMA_TREND",
+                    strategy_version="1.0.0",
+                )
+                # 调用幂等保存；相同历史和参数重跑只更新同一个评估哈希记录。
+                record_id = save_qualification(decision, venue=venue)
+                status = "APPROVED" if decision.approved else "REJECTED"
+                print(
+                    f"{contract} {interval}: {status}, record_id={record_id}, "
+                    f"return={decision.compounded_return:.2%}, "
+                    f"worst_dd={decision.worst_drawdown:.2%}, "
+                    f"positive_folds={decision.positive_folds}/{decision.total_folds}, "
+                    f"min_trades={decision.minimum_fold_trades}"
+                )
+                print(f"  原因: {decision.reason}")
+        print("固定突破准入完成：只授权本地模拟，LIVE_TRADING=false")
         return
     if args.command == "execution-safety":
         # 调用只读计数查询，不读取API密钥、账户余额或订单请求明细。
@@ -809,9 +1035,12 @@ def main() -> None:
             max_cycles=args.max_cycles,
         )
         stop_event = Event()
+        # 首轮完成后立即发送启动报告；成功或失败后均按固定四小时间隔安排下一次。
+        next_status_email_at = datetime.now(UTC)
 
         def refresh_gate_risk_and_signals_after_market_cycle() -> None:
             """行情发布后先刷新Gate账户风控，再按开关运行模拟信号周期。"""
+            nonlocal next_status_email_at
             # 调用只读测试网账户接口；客户端没有任何订单提交方法。
             with GateTestnetClient.from_settings(settings) as account_client:
                 account = account_client.get_account()
@@ -830,12 +1059,23 @@ def main() -> None:
             )
             # 调用统一2%/8%状态机；失败或熔断结论均先于信号与订单门禁发布。
             risk_state = evaluate_and_save_runtime_risk(GATE_TESTNET_VENUE)
-            print(
+            _runtime_log(
                 f"Gate账户风控：{risk_state.state}，"
                 f"当日收益{risk_state.daily_return:.2%}，回撤{risk_state.drawdown:.2%}"
             )
             if not args.enable_signals:
                 return
+            # 调用执行安全状态查询确认至少存在一条已批准策略；仅观察行情时不创建模拟账本。
+            safety = read_execution_safety_status(oanda_enabled=False)
+            if safety.approved_qualifications > 0:
+                # 调用本地模拟账本刷新，在策略获准且信号观察启动时立即固定初始资金。
+                # 30天计时不应依赖首次入场信号；此处只建立资金快照，不创建订单或成交。
+                paper_account = refresh_paper_account(
+                    now=snapshot_time,
+                    initial_equity=account.total,
+                )
+                if paper_account is None:
+                    raise RuntimeError("获准策略存在，但Gate模拟资金账本初始化失败")
             # 调用模拟信号周期；策略未批准和仓位换算未完成都会保持订单数为零。
             signal_summary = run_paper_signal_cycle(
                 tuple(args.contracts),
@@ -851,32 +1091,73 @@ def main() -> None:
             blocked_streams = sum(
                 stream.status.startswith("BLOCKED") for stream in signal_summary.streams
             )
-            print(
+            _runtime_log(
                 f"信号观察完成：新增{signal_summary.new_signal_count}条，"
                 f"阻断行情流{blocked_streams}条，订单{signal_summary.order_count}张"
             )
             # 调用30天监督器汇总完整UTC日；账户未初始化时不会提前启动计时。
             simulation = refresh_paper_simulation()
             if simulation is not None:
-                print(
+                _runtime_log(
                     f"模拟监督：{simulation.status}，连续健康"
                     f"{simulation.consecutive_healthy_days}/{simulation.required_days}天"
                 )
+            if settings.status_email_to and snapshot_time >= next_status_email_at:
+                message = build_gate_status_email(snapshot_time)
+                delivery_status = "SENT"
+                delivery_error: str | None = None
+                try:
+                    # 调用QQ SSL SMTP发送只读摘要；授权码仅从SecretStr取出并传入内存连接。
+                    send_smtp_email(
+                        message,
+                        host=settings.smtp_host or "",
+                        port=settings.smtp_port,
+                        username=settings.smtp_username or "",
+                        password=(
+                            settings.smtp_password.get_secret_value()
+                            if settings.smtp_password is not None
+                            else ""
+                        ),
+                        sender=settings.smtp_from or "",
+                        recipient=settings.status_email_to,
+                    )
+                except RuntimeError as error:
+                    # 邮件属于旁路通知，发送失败只记日志，绝不让行情轮询进入重试。
+                    delivery_status = "FAILED"
+                    delivery_error = str(error)
+                    _runtime_log(f"四小时邮件报告发送失败：{error}")
+                else:
+                    _runtime_log(f"四小时邮件报告已发送至{settings.status_email_to}")
+                finally:
+                    try:
+                        # 调用MySQL审计仅保存标题和结果，不保存正文、账号或SMTP授权码。
+                        save_email_delivery(
+                            recipient=settings.status_email_to,
+                            subject=message.subject,
+                            status=delivery_status,
+                            attempted_at=snapshot_time,
+                            error_message=delivery_error,
+                        )
+                    except (OSError, RuntimeError, ValueError, SQLAlchemyError) as audit_error:
+                        _runtime_log(f"邮件发送审计保存失败：{audit_error}")
+                    next_status_email_at = snapshot_time + timedelta(
+                        hours=settings.status_email_interval_hours
+                    )
 
         # 调用行情运行器；每轮都刷新账户风控，只有显式开关才追加EMA信号观察。
         runner = MarketDataRunner(
             settings,
             runner_config,
             stop_event=stop_event,
-            reporter=print,
+            reporter=_runtime_log,
             after_cycle=refresh_gate_risk_and_signals_after_market_cycle,
         )
-        print("行情服务启动；仅连接Gate测试网，真实交易始终关闭")
+        _runtime_log("行情服务启动；仅连接Gate测试网，真实交易始终关闭")
         # 文件锁阻止本机重复进程；信号处理器让Ctrl+C和Docker停止都能安全收尾。
         with SingleInstanceLock(args.lock_file), install_shutdown_signal_handlers(stop_event):
             result = runner.run()
-        print(f"行情服务已安全停止，成功轮询{result.successful_cycles}轮")
-        print("Exchange order submission available: False")
+        _runtime_log(f"行情服务已安全停止，成功轮询{result.successful_cycles}轮")
+        _runtime_log("Exchange order submission available: False")
         return
     if args.command == "market-runner-status":
         # 调用只读状态查询，服务从未启动时明确显示缺失而不假定其健康。
@@ -952,7 +1233,7 @@ def main() -> None:
             )
             # 调用统一状态机，先发布2%/8%风控结论再考虑策略信号。
             risk_state = evaluate_and_save_runtime_risk(OANDA_PRACTICE_VENUE)
-            print(
+            _runtime_log(
                 f"OANDA账户风控：{risk_state.state}，"
                 f"当日收益{risk_state.daily_return:.2%}，回撤{risk_state.drawdown:.2%}"
             )
@@ -971,10 +1252,10 @@ def main() -> None:
                         account_id, args.oanda_instrument
                     )
             except OandaApiError as error:
-                print(f"黄金模拟执行门禁：BLOCKED_ACCOUNT_INSTRUMENT，原因：{error}")
+                _runtime_log(f"黄金模拟执行门禁：BLOCKED_ACCOUNT_INSTRUMENT，原因：{error}")
                 return
             if not current_price.tradeable:
-                print("黄金模拟执行门禁：BLOCKED_NOT_TRADEABLE")
+                _runtime_log("黄金模拟执行门禁：BLOCKED_NOT_TRADEABLE")
                 return
             # 调用黄金独立模拟账本；首次固定Practice净值，之后每轮只刷新本地权益。
             refresh_paper_account(
@@ -1036,7 +1317,7 @@ def main() -> None:
             )
             new_signal_count = sum(summary.new_signal_count for summary in summaries)
             order_count = sum(summary.order_count for summary in summaries)
-            print(
+            _runtime_log(
                 f"黄金信号观察完成：新增{new_signal_count}条，"
                 f"阻断行情流{blocked_streams}条，本地模拟订单{order_count}张"
             )
@@ -1046,7 +1327,7 @@ def main() -> None:
                 market_service_name=OANDA_MARKET_DATA_SERVICE_NAME,
             )
             if simulation is not None:
-                print(
+                _runtime_log(
                     f"黄金模拟监督：{simulation.status}，连续健康"
                     f"{simulation.consecutive_healthy_days}/{simulation.required_days}天"
                 )
@@ -1059,17 +1340,17 @@ def main() -> None:
             importer=import_oanda_runner_cycle,  # type: ignore[arg-type]
             health_refresher=refresh_oanda_runner_health,
             after_cycle=refresh_oanda_risk_and_signals_after_market_cycle,
-            reporter=print,
+            reporter=_runtime_log,
             service_name=OANDA_MARKET_DATA_SERVICE_NAME,
         )
-        print("OANDA黄金行情服务启动；仅连接Practice，真实交易始终关闭")
+        _runtime_log("OANDA黄金行情服务启动；仅连接Practice，真实交易始终关闭")
         # 调用独立文件锁和信号处理器，确保不与Gate服务争用锁且停止时完整收尾。
         with SingleInstanceLock(args.oanda_lock_file), install_shutdown_signal_handlers(
             oanda_stop_event
         ):
             result = oanda_runner.run()
-        print(f"OANDA黄金行情服务已安全停止，成功轮询{result.successful_cycles}轮")
-        print("Exchange order submission available: False")
+        _runtime_log(f"OANDA黄金行情服务已安全停止，成功轮询{result.successful_cycles}轮")
+        _runtime_log("Exchange order submission available: False")
         return
     if args.command == "oanda-runner-status":
         # 调用OANDA独立服务名查询，绝不把Gate心跳当作黄金行情健康证据。

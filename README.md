@@ -42,7 +42,13 @@ python main.py walkforward-filters --intervals 15m 30m
 python main.py walkforward-pullback --intervals 15m 30m
 python main.py walkforward-regime --intervals 5m 15m 30m 1h
 python main.py walkforward-ema12 --intervals 15m 30m
+python main.py walkforward-breakout --intervals 5m 15m 30m 1h
+python main.py walkforward-joint-breakout --intervals 5m 15m 30m 1h
+python main.py walkforward-joint-exits --intervals 30m
+python main.py walkforward-joint-regime --intervals 30m
+python main.py walkforward-joint-macro --intervals 30m
 python main.py qualify-ema --intervals 15m 30m
+python main.py qualify-breakout-fixed --intervals 30m
 python main.py execution-safety
 python main.py system-readiness
 python main.py risk-snapshot
@@ -135,10 +141,38 @@ EMA12位于EMA144和EMA169同一侧、最近5根斜率同向、价格真实触�
 高周期收盘后才可见、下一根1m才执行。由于本项目当前明确只运行5m至1h，数据库也没有
 足够的1m历史，RSI暂不接入命令、准入和模拟交易；不能用5m代替1m后冒充原策略结果。
 
+`walkforward-breakout` 用EMA20/50和EMA200确定多空趋势，只在收盘价突破此前10/20/40根
+K线区间时入场。历史区间明确先移动一根再计算，当前K线不会参与自己的突破门槛；信号
+仍在下一根开盘执行。研究固定多空双向，只组合三档突破窗口和ATR 1.5/2.0/2.5，共9组
+候选，并沿用手续费、滑点、每日2%及最大回撤8%熔断。该命令只研究，不写准入记录。
+
+`walkforward-joint-breakout` 不允许BTC和ETH分别挑选各自最有利的参数。每一折都用同一组
+突破窗口和ATR同时回测两个品种，训练排名首先比较两者中较差的“收益减半倍回撤”得分，
+最差得分相同时才比较平均得分。选中的共同参数随后分别进入两个独立样本外窗口；输出按
+品种检查复合收益、2/3盈利窗口、8%回撤和每折至少8笔交易，但不会自动写入准入表。
+
+`walkforward-joint-exits` 聚焦共同突破的退出管理：入场窗口只保留20/40根，组合ATR止损
+1.5/2.0/2.5、固定止盈关闭/2ATR/3ATR以及固定止损/移动止损，共36组候选。止盈和止损
+都使用进场前最后一根已收盘K线的ATR，不读取执行K线未来波动；参数仍按BTC、ETH中较弱
+训练得分选择。该功能目前只属于研究回测，纸面交易尚未实现止盈或移动止损执行。
+
+`walkforward-joint-regime` 保持固定止损且不设止盈，要求已完成1小时K线的EMA200方向确认，
+再组合ADX 20/25、EMA200斜率回看5/10根、突破窗口20/40根和ATR止损三档，共24组共同
+候选。ADX与EMA斜率都只读取执行前已收盘数据，用于过滤弱趋势和横盘阶段。
+
+`walkforward-joint-macro` 使用相同的24组候选，但把30m策略的方向确认提升到已完整收盘的
+4小时EMA200。验证集会附带至少约1600根30m预热K线，避免宏观EMA尚未形成时错误漏掉
+样本外开仓；它主要用于过滤长期上涨过程中的短周期假空头突破。
+
 `qualify-ema` 是进入模拟交易前的硬门禁。默认要求滚动样本外复合收益严格大于0、
 至少2/3验证窗口盈利、最差单折回撤低于8%，并且每个验证窗口至少8笔交易。所有条件
 必须同时满足；结论与完整门槛会幂等写入 `strategy_qualifications`。被拒绝的策略不能
 启动30天模拟运行，且 `LIVE_TRADING=false` 不受任何准入结果影响。
+
+`qualify-breakout-fixed` 只评估BTC、ETH的30m固定策略：EMA20/50/200趋势、20根区间突破、
+ADX至少25、已完成1小时EMA200方向确认、EMA200斜率回看5根、1.5ATR止损、多空双向。
+三折中每折只有这一组参数，验证结果不能反向改变参数；通过后写入现有EMA_TREND 1.0.0
+准入通道，使当前纸面信号循环可以解析，同样不会启用交易所下单。
 
 执行安全层使用策略运行、准入哈希、品种、周期、K线时间和动作生成确定性的
 `client_order_id`。同一订单重试返回原记录；状态不明时只能按该编号查询，禁止直接

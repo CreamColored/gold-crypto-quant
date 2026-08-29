@@ -54,6 +54,7 @@ def resolve_approved_parameters(
             allow_short=allow_short,
             min_adx=float(first["min_adx"]),
             use_higher_timeframe_filter=bool(first["higher_timeframe_filter"]),
+            higher_timeframe_mode=str(first.get("higher_timeframe_mode", "standard")),
             # 旧版批准记录没有该字段时保持0，确保历史审计记录仍可安全解析。
             trend_slope_lookback=int(first.get("trend_slope_lookback", 0)),
             cooldown_bars=int(first["cooldown_bars"]),

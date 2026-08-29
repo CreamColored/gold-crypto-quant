@@ -45,6 +45,7 @@ def ensure_paper_strategy_run(
         "allow_short": deployment.strategy.allow_short,
         "min_adx": deployment.strategy.min_adx,
         "higher_timeframe_filter": deployment.strategy.use_higher_timeframe_filter,
+        "higher_timeframe_mode": deployment.strategy.higher_timeframe_mode,
         "cooldown_bars": deployment.strategy.cooldown_bars,
         "entry_mode": deployment.strategy.entry_mode,
         "pullback_lookback": deployment.strategy.pullback_lookback,
