@@ -20,6 +20,9 @@ from gold_crypto_quant.storage.models import (
     Trade,
 )
 
+ACTIVE_STRATEGY_NAME = "BOLLINGER_RANGE"
+ACTIVE_STRATEGY_VERSION = "3.0.0"
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionSafetyStatus:
@@ -63,6 +66,8 @@ def read_execution_safety_status(
             .join(Instrument, Instrument.id == StrategyQualification.instrument_id)
             .where(
                 StrategyQualification.decision == "APPROVED",
+                StrategyQualification.strategy_name == ACTIVE_STRATEGY_NAME,
+                StrategyQualification.strategy_version == ACTIVE_STRATEGY_VERSION,
                 Instrument.venue.in_(enabled_venues),
             )
         )
@@ -72,6 +77,8 @@ def read_execution_safety_status(
             .join(Instrument, Instrument.id == StrategyQualification.instrument_id)
             .where(
                 StrategyQualification.decision == "REJECTED",
+                StrategyQualification.strategy_name == ACTIVE_STRATEGY_NAME,
+                StrategyQualification.strategy_version == ACTIVE_STRATEGY_VERSION,
                 Instrument.venue.in_(enabled_venues),
             )
         )

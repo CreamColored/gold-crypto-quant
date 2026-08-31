@@ -2,10 +2,13 @@
 
 from gold_crypto_quant.notifications.smtp_mail import (
     StatusEmailMessage,
+    build_gate_event_email,
     _format_bytes,
     _format_uptime,
     send_smtp_email,
 )
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 
 def test_formats_mac_resource_values_for_email() -> None:
@@ -48,3 +51,36 @@ def test_sends_message_through_ssl_smtp(monkeypatch) -> None:
     message = captured["message"]
     assert message["To"] == "recipient@example.com"
     assert message["Subject"] == "测试主题"
+
+
+def test_event_email_contains_trade_and_safety_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.smtp_mail.read_service_state",
+        lambda _name: SimpleNamespace(process_id=None),
+    )
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.smtp_mail.read_execution_safety_status",
+        lambda **_kwargs: SimpleNamespace(
+            approved_qualifications=0,
+            active_orders=0,
+            open_positions=0,
+            paper_account_equity="993.08",
+            gate_runtime_risk_state="NORMAL",
+            runtime_risk_state="NORMAL",
+        ),
+    )
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.smtp_mail._build_system_status_lines",
+        lambda *_args: ("Mac服务器状态：测试",),
+    )
+
+    # 调用事件模板，确认买卖信息和实盘硬关闭状态同时出现在邮件中。
+    message = build_gate_event_email(
+        datetime(2026, 8, 31, tzinfo=UTC),
+        event_title="ETH_USDT 模拟买入开仓成交",
+        event_lines=("成交价格：2500",),
+    )
+
+    assert "模拟买入" in message.subject
+    assert "成交价格：2500" in message.body
+    assert "交易所订单提交：False" in message.body

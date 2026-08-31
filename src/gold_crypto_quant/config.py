@@ -35,10 +35,8 @@ class Settings(BaseSettings):
     # 策略累计回撤达到 8% 后触发总熔断。
     max_drawdown_limit: float = Field(default=0.08, gt=0, le=0.25)
 
-    # 使用Mac邮件发送运行摘要；留空时完全禁用邮件功能。
+    # 通过SMTP发送成交和重要异常事件；留空时完全禁用邮件功能。
     status_email_to: str | None = None
-    # 当前只允许固定四小时汇报，Field约束防止误配造成高频邮件。
-    status_email_interval_hours: int = Field(default=4, ge=1, le=24)
     # SMTP配置使用独立授权码，不允许复用邮箱网页登录密码。
     smtp_host: str | None = None
     smtp_port: int = Field(default=465, ge=1, le=65535)

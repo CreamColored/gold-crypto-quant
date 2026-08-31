@@ -152,6 +152,7 @@ class MarketDataRunner:
         after_cycle: Callable[[], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         reporter: Callable[[str], None] | None = None,
+        event_reporter: Callable[[str, str], None] | None = None,
         service_name: str = MARKET_DATA_SERVICE_NAME,
     ) -> None:
         self.settings = settings
@@ -166,7 +167,15 @@ class MarketDataRunner:
         self.after_cycle = after_cycle
         self.clock = clock or (lambda: datetime.now(UTC))
         self.reporter = reporter or (lambda _message: None)
+        self.event_reporter = event_reporter or (lambda _event, _detail: None)
         self.service_name = service_name
+
+    def _report_event(self, event: str, detail: str) -> None:
+        """调用旁路事件通知；邮件等通知故障不能拖垮行情主循环。"""
+        try:
+            self.event_reporter(event, detail)
+        except Exception as error:
+            self.reporter(f"事件通知失败：{safe_error_summary(error)}")
 
     def _save_state(
         self,
@@ -233,6 +242,7 @@ class MarketDataRunner:
             successful_cycles=successful_cycles,
             consecutive_failures=consecutive_failures,
         )
+        self._report_event("SERVICE_STARTED", "Gate行情观察服务已经启动")
         try:
             while not self.stop_event.is_set():
                 try:
@@ -249,6 +259,9 @@ class MarketDataRunner:
                         f"行情轮询失败（连续{consecutive_failures}次），"
                         f"{delay:g}秒后重试：{error_summary}"
                     )
+                    if consecutive_failures == 1:
+                        # 第一次失败立即发异常事件；连续重试只更新日志，避免每轮重复邮件。
+                        self._report_event("SERVICE_RETRYING", error_summary)
                     # 调用状态保存记录RETRYING；任何订单会继续受旧行情心跳超时门禁保护。
                     self._save_state(
                         "RETRYING",
@@ -261,8 +274,15 @@ class MarketDataRunner:
                     self.stop_event.wait(delay)
                     continue
 
+                recovered_failures = consecutive_failures
                 successful_cycles += 1
                 consecutive_failures = 0
+                if recovered_failures > 0:
+                    # 调用恢复事件通知，让用户知道此前异常已经结束。
+                    self._report_event(
+                        "SERVICE_RECOVERED",
+                        f"行情服务在连续失败{recovered_failures}次后恢复",
+                    )
                 self.reporter(
                     f"行情轮询第{successful_cycles}轮完成，刷新{updated_bars}条已收盘K线"
                 )
@@ -290,6 +310,7 @@ class MarketDataRunner:
                 consecutive_failures=consecutive_failures,
                 stopped_at=stopped_at,
             )
+            self._report_event("SERVICE_STOPPED", "Gate行情观察服务已经停止")
         return RunnerResult(
             successful_cycles=successful_cycles,
             stopped_by_request=self.stop_event.is_set(),

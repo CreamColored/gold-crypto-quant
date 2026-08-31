@@ -57,7 +57,11 @@ def average_directional_index(bars: pd.DataFrame, period: int = 14) -> pd.Series
     negative_smoothed = negative_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     positive_di = 100.0 * positive_smoothed / atr
     negative_di = 100.0 * negative_smoothed / atr
-    denominator = (positive_di + negative_di).replace(0.0, pd.NA)
+    # 使用浮点NaN而不是pd.NA，避免完全静止行情把序列提升为object后使ewm无法计算。
+    denominator = (positive_di + negative_di).where(
+        (positive_di + negative_di) != 0.0,
+        float("nan"),
+    )
     directional_index = 100.0 * (positive_di - negative_di).abs() / denominator
     # ADX是DX的第二次Wilder平滑，因此需要比ATR更长的预热区间。
     return directional_index.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()

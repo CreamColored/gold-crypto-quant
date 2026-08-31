@@ -138,6 +138,43 @@ def build_gate_status_email(now: datetime) -> StatusEmailMessage:
     return StatusEmailMessage(subject=subject, body=body)
 
 
+def build_gate_event_email(
+    now: datetime,
+    *,
+    event_title: str,
+    event_lines: tuple[str, ...],
+    severity: str = "INFO",
+) -> StatusEmailMessage:
+    """生成交易或异常事件邮件，并附带当时的账户与Mac状态。"""
+    if now.tzinfo is None:
+        raise ValueError("event email time must be timezone-aware")
+    if severity not in {"INFO", "WARNING", "CRITICAL", "RECOVERED"}:
+        raise ValueError("unsupported email event severity")
+    service = read_service_state(GATE_SERVICE_NAME)
+    safety = read_execution_safety_status(oanda_enabled=False)
+    local_time = now.astimezone()
+    process_id = service.process_id if service is not None else None
+    subject = f"[量化{severity}] {event_title} {local_time:%Y-%m-%d %H:%M:%S}"
+    body_lines = (
+        f"事件时间：{local_time:%Y-%m-%d %H:%M:%S %z}",
+        f"事件级别：{severity}",
+        f"事件名称：{event_title}",
+        "",
+        *event_lines,
+        "",
+        "交易与风控状态",
+        f"活动策略批准数：{safety.approved_qualifications}",
+        f"活动订单：{safety.active_orders}",
+        f"开放持仓：{safety.open_positions}",
+        f"模拟权益：{safety.paper_account_equity or 'NOT_INITIALIZED'}",
+        f"Gate账户风控：{safety.gate_runtime_risk_state}",
+        f"模拟账户风控：{safety.runtime_risk_state}",
+        "真实交易：False",
+        "交易所订单提交：False",
+    ) + _build_system_status_lines(process_id, now)
+    return StatusEmailMessage(subject=subject, body="\n".join(body_lines))
+
+
 def send_smtp_email(
     message: StatusEmailMessage,
     *,

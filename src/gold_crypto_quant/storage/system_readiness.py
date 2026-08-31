@@ -27,6 +27,10 @@ from gold_crypto_quant.storage.paper_account import (
     OANDA_PAPER_ACCOUNT_VENUE,
     PAPER_ACCOUNT_VENUE,
 )
+from gold_crypto_quant.storage.execution_status import (
+    ACTIVE_STRATEGY_NAME,
+    ACTIVE_STRATEGY_VERSION,
+)
 
 GATE_EXPECTED_MARKET_STREAMS = 8
 ALL_EXPECTED_MARKET_STREAMS = 12
@@ -129,7 +133,11 @@ def read_system_readiness(
             session.scalars(
                 select(StrategyQualification)
                 .join(Instrument, Instrument.id == StrategyQualification.instrument_id)
-                .where(Instrument.venue.in_(enabled_venues))
+                .where(
+                    Instrument.venue.in_(enabled_venues),
+                    StrategyQualification.strategy_name == ACTIVE_STRATEGY_NAME,
+                    StrategyQualification.strategy_version == ACTIVE_STRATEGY_VERSION,
+                )
                 .order_by(
                     StrategyQualification.evaluated_at.desc(),
                     StrategyQualification.id.desc(),

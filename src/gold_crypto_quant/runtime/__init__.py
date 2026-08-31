@@ -8,6 +8,10 @@ from gold_crypto_quant.runtime.market_data_runner import (
     SingleInstanceLock,
     install_shutdown_signal_handlers,
 )
+from gold_crypto_quant.runtime.bollinger_signal_cycle import (
+    BollingerSignalCycleSummary,
+    run_bollinger_signal_cycle,
+)
 from gold_crypto_quant.runtime.paper_signal_cycle import run_paper_signal_cycle
 
 __all__ = [
@@ -16,6 +20,8 @@ __all__ = [
     "MarketDataRunner",
     "RunnerConfig",
     "SingleInstanceLock",
+    "BollingerSignalCycleSummary",
     "install_shutdown_signal_handlers",
+    "run_bollinger_signal_cycle",
     "run_paper_signal_cycle",
 ]

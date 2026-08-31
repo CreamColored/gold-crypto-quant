@@ -4,11 +4,9 @@
 """
 
 import argparse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
-
-from sqlalchemy.exc import SQLAlchemyError
 
 from gold_crypto_quant.backtest import (
     EmaBacktestConfig,
@@ -18,6 +16,12 @@ from gold_crypto_quant.backtest import (
     run_holdout_research,
     run_joint_breakout_research,
     run_rolling_research,
+)
+from gold_crypto_quant.backtest.bollinger_range import (
+    BollingerBacktestConfig,
+    build_bollinger_qualification_decision,
+    qualify_fixed_bollinger_strategy,
+    run_bollinger_backtest,
 )
 from gold_crypto_quant.config import Settings, get_settings
 from gold_crypto_quant.exchanges.gate import GateTestnetClient
@@ -30,7 +34,7 @@ from gold_crypto_quant.exchanges.oanda import (
 from gold_crypto_quant.market_data import import_gate_history, import_oanda_history
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.market_data.oanda_history import OANDA_PRACTICE_VENUE
-from gold_crypto_quant.notifications import build_gate_status_email, send_smtp_email
+from gold_crypto_quant.notifications import RuntimeEventNotifier
 from gold_crypto_quant.risk.qualification import evaluate_rolling_research
 from gold_crypto_quant.runtime import (
     MARKET_DATA_SERVICE_NAME,
@@ -39,16 +43,15 @@ from gold_crypto_quant.runtime import (
     RunnerConfig,
     SingleInstanceLock,
     install_shutdown_signal_handlers,
+    run_bollinger_signal_cycle,
     run_paper_signal_cycle,
 )
 from gold_crypto_quant.runtime.oanda_paper_entry import execute_approved_oanda_paper_entry
-from gold_crypto_quant.runtime.paper_entry import execute_approved_paper_entry
 from gold_crypto_quant.storage import (
     check_connection,
     create_schema,
     sync_schema_comments,
 )
-from gold_crypto_quant.storage.email_delivery import save_email_delivery
 from gold_crypto_quant.storage.execution_status import read_execution_safety_status
 from gold_crypto_quant.storage.market_bars import load_market_bars
 from gold_crypto_quant.storage.market_health import refresh_market_health
@@ -72,6 +75,7 @@ from gold_crypto_quant.storage.runtime_risk import (
 from gold_crypto_quant.storage.service_state import read_service_state
 from gold_crypto_quant.storage.system_readiness import read_system_readiness
 from gold_crypto_quant.strategy import EmaTrendParameters
+from gold_crypto_quant.strategy.bollinger_range import parameters_for_same_timeframe
 
 
 def _venue_for_symbol(symbol: str) -> str:
@@ -116,6 +120,8 @@ def main() -> None:
             "sync-comments",
             "import-gate-bars",
             "import-oanda-bars",
+            "backtest-bollinger",
+            "qualify-bollinger",
             "backtest-ema",
             "diagnose-ema",
             "research-ema",
@@ -192,7 +198,7 @@ def main() -> None:
     parser.add_argument(
         "--enable-signals",
         action="store_true",
-        help="在长期行情服务每轮成功后运行EMA信号观察，仍不创建订单",
+        help="在长期行情服务每轮成功后运行布林带信号观察；实盘提交始终关闭",
     )
     # 初始权益只用于回测资金和风险计算，不会读取或修改测试网账户余额。
     parser.add_argument("--initial-equity", type=float, default=10_000.0, help="回测初始权益")
@@ -252,6 +258,71 @@ def main() -> None:
                 f"pages={result.pages}"
             )
         print("OANDA environment: Practice")
+        print("Exchange order submission available: False")
+        return
+    if args.command in {"backtest-bollinger", "qualify-bollinger"}:
+        # 新策略的固定点数参数只为ETH设计；BTC必须另做尺度化研究，不能直接套用。
+        unsupported = [contract for contract in args.contracts if contract != "ETH_USDT"]
+        if unsupported:
+            print(f"跳过非ETH品种：{', '.join(unsupported)}；固定点数参数不能跨品种复用")
+        # Gate测试网只开放有限数量的5分钟历史；读取最近连续窗口，避免旧数据断层污染结果。
+        bars_5m = load_market_bars("ETH_USDT", "5m", limit=1999)
+        all_bars_15m = load_market_bars("ETH_USDT", "15m")
+        # 两个周期使用同一个近七天起点，保证最终结果可以直接横向比较。
+        bars_15m = all_bars_15m.loc[all_bars_15m.index >= bars_5m.index[0]]
+        bollinger_config = BollingerBacktestConfig(initial_equity=args.initial_equity)
+        if args.command == "backtest-bollinger":
+            for interval, bars in (("15m", bars_15m), ("5m", bars_5m)):
+                # 调用同周期因果回测：本周期确认震荡、触轨，并在本周期下一根开盘执行。
+                result = run_bollinger_backtest(
+                    bars,
+                    bars,
+                    symbol="ETH_USDT",
+                    parameters=parameters_for_same_timeframe(interval),
+                    config=bollinger_config,
+                    same_timeframe=True,
+                )
+                print(
+                    f"ETH_USDT {interval}同周期: return={result.total_return:.2%}, "
+                    f"DD={result.max_drawdown:.2%}, trades={result.trade_count}, "
+                    f"win_rate={result.win_rate:.2%}, PF={result.profit_factor:.2f}"
+                )
+                print(
+                    f"  止损={result.stop_count}, 中轨减仓={result.middle_reduction_count}, "
+                    f"对侧轨止盈={result.opposite_band_exit_count}"
+                )
+            print("Live trading: False")
+            print("Exchange order submission available: False")
+            return
+        # 调用固定参数三折准入；失败结果同样保存，确保不能靠删除失败记录绕过门禁。
+        for interval, bars in (("15m", bars_15m), ("5m", bars_5m)):
+            qualification = qualify_fixed_bollinger_strategy(
+                bars,
+                bars,
+                symbol="ETH_USDT",
+                parameters=parameters_for_same_timeframe(interval),
+                config=bollinger_config,
+                interval=interval,
+                same_timeframe=True,
+            )
+            decision = build_bollinger_qualification_decision(qualification)
+            record_id = save_qualification(decision)
+            for fold_number, fold in enumerate(qualification.folds, start=1):
+                print(
+                    f"  {interval} Fold {fold_number}: return={fold.total_return:.2%}, "
+                    f"DD={fold.max_drawdown:.2%}, trades={fold.trade_count}, "
+                    f"win_rate={fold.win_rate:.2%}, PF={fold.profit_factor:.2f}"
+                )
+            print(
+                f"ETH_USDT {interval}同周期: "
+                f"{'APPROVED' if qualification.approved else 'REJECTED'}, "
+                f"record_id={record_id}, return={qualification.compounded_return:.2%}, "
+                f"worst_dd={qualification.worst_drawdown:.2%}, "
+                f"positive_folds={qualification.positive_folds}/3, "
+                f"min_trades={qualification.minimum_fold_trades}"
+            )
+            print(f"  原因: {qualification.reason}")
+        print("Live trading: False")
         print("Exchange order submission available: False")
         return
     if args.command == "backtest-ema":
@@ -799,11 +870,12 @@ def main() -> None:
                 print(f"  原因: {decision.reason}")
         return
     if args.command == "qualify-breakout-fixed":
-        # 固定参数来自200天历史上的共同稳定性审计；准入时不再允许按验证结果选参。
+        # 15根突破是对20根基准的温和放宽；它已单独通过BTC和ETH三折样本外硬门槛。
+        # 准入过程仍只接受这一组固定参数，禁止根据验证窗口临时选择更好看的结果。
         create_schema()
         fixed_strategy = EmaTrendParameters(
             entry_mode="breakout",
-            pullback_lookback=20,
+            pullback_lookback=15,
             min_adx=25.0,
             use_higher_timeframe_filter=True,
             higher_timeframe_mode="standard",
@@ -834,7 +906,7 @@ def main() -> None:
                         higher_timeframe_filters=(True,),
                         trend_slope_lookbacks=(5,),
                         cooldown_options=(0,),
-                        entry_variants=(("breakout", 20),),
+                        entry_variants=(("breakout", 15),),
                         base_strategy=fixed_strategy,
                         base_config=fixed_config,
                     )
@@ -1035,12 +1107,33 @@ def main() -> None:
             max_cycles=args.max_cycles,
         )
         stop_event = Event()
-        # 首轮完成后立即发送启动报告；成功或失败后均按固定四小时间隔安排下一次。
-        next_status_email_at = datetime.now(UTC)
+        # 创建事件通知器；不再按固定四小时发送，只在成交或重要状态变化时发送。
+        event_notifier = RuntimeEventNotifier(settings)
+        previous_gate_risk_state: str | None = None
+        previous_signal_status: str | None = None
+
+        def report_runtime_event(event: str, detail: str) -> None:
+            """把行情服务生命周期事件转换为即时邮件，重复重试不会逐分钟刷屏。"""
+            titles = {
+                "SERVICE_STARTED": ("Gate行情服务启动", "INFO"),
+                "SERVICE_RETRYING": ("Gate行情服务异常", "CRITICAL"),
+                "SERVICE_RECOVERED": ("Gate行情服务恢复", "RECOVERED"),
+                "SERVICE_STOPPED": ("Gate行情服务停止", "WARNING"),
+            }
+            title, severity = titles.get(event, (event, "WARNING"))
+            sent = event_notifier.send(
+                event_key=f"runtime:{event}",
+                event_title=title,
+                event_lines=(f"详情：{detail}",),
+                severity=severity,
+                repeatable=event in {"SERVICE_RETRYING", "SERVICE_RECOVERED"},
+            )
+            if sent:
+                _runtime_log(f"事件邮件已发送：{title}")
 
         def refresh_gate_risk_and_signals_after_market_cycle() -> None:
             """行情发布后先刷新Gate账户风控，再按开关运行模拟信号周期。"""
-            nonlocal next_status_email_at
+            nonlocal previous_gate_risk_state, previous_signal_status
             # 调用只读测试网账户接口；客户端没有任何订单提交方法。
             with GateTestnetClient.from_settings(settings) as account_client:
                 account = account_client.get_account()
@@ -1063,6 +1156,28 @@ def main() -> None:
                 f"Gate账户风控：{risk_state.state}，"
                 f"当日收益{risk_state.daily_return:.2%}，回撤{risk_state.drawdown:.2%}"
             )
+            if (
+                risk_state.state != previous_gate_risk_state
+                and (previous_gate_risk_state is not None or risk_state.state != "NORMAL")
+            ):
+                # 调用事件邮件；熔断立即告警，恢复为NORMAL时也发送恢复通知。
+                event_notifier.send(
+                    event_key=f"gate-risk:{previous_gate_risk_state}->{risk_state.state}",
+                    event_title=(
+                        "Gate账户风控恢复"
+                        if risk_state.state == "NORMAL"
+                        else "Gate账户触发风控"
+                    ),
+                    event_lines=(
+                        f"原状态：{previous_gate_risk_state or '-'}",
+                        f"新状态：{risk_state.state}",
+                        f"当日收益：{risk_state.daily_return:.2%}",
+                        f"历史回撤：{risk_state.drawdown:.2%}",
+                    ),
+                    severity="RECOVERED" if risk_state.state == "NORMAL" else "CRITICAL",
+                    repeatable=True,
+                )
+            previous_gate_risk_state = risk_state.state
             if not args.enable_signals:
                 return
             # 调用执行安全状态查询确认至少存在一条已批准策略；仅观察行情时不创建模拟账本。
@@ -1076,80 +1191,65 @@ def main() -> None:
                 )
                 if paper_account is None:
                     raise RuntimeError("获准策略存在，但Gate模拟资金账本初始化失败")
-            # 调用模拟信号周期；策略未批准和仓位换算未完成都会保持订单数为零。
-            signal_summary = run_paper_signal_cycle(
-                tuple(args.contracts),
-                tuple(args.intervals),
-                bar_limit=args.bar_limit,
-                entry_executor=lambda **kwargs: execute_approved_paper_entry(
-                    settings=settings,
-                    **kwargs,
-                ),
-                exit_executor=close_position_for_ema_signal,
-                position_monitor=lambda: monitor_paper_positions(bar_limit=args.bar_limit),
+            # 调用新的15m与5m独立同周期观察；旧EMA和跨周期信号不再进入订单路径。
+            signal_summary = run_bollinger_signal_cycle(
+                symbol="ETH_USDT",
+                bar_limit_5m=args.bar_limit,
+                bar_limit_15m=max(300, args.bar_limit // 3),
             )
-            blocked_streams = sum(
-                stream.status.startswith("BLOCKED") for stream in signal_summary.streams
-            )
+            blocked_streams = int(signal_summary.status.startswith("BLOCKED"))
             _runtime_log(
                 f"信号观察完成：新增{signal_summary.new_signal_count}条，"
-                f"阻断行情流{blocked_streams}条，订单{signal_summary.order_count}张"
+                f"阻断行情流{blocked_streams}条，订单{signal_summary.order_count}张，"
+                f"影子权益{signal_summary.paper_equity:.2f} USDT"
             )
+            for paper_event in signal_summary.paper_events:
+                # 调用事件邮件，把每次模拟开仓、减仓、平仓和熔断立即通知用户。
+                event_notifier.send(
+                    event_key=paper_event.event_key,
+                    event_title=paper_event.title,
+                    event_lines=paper_event.lines,
+                    severity=paper_event.severity,
+                    repeatable=True,
+                )
+            if signal_summary.status != previous_signal_status and signal_summary.status in {
+                "BLOCKED_MARKET_HEALTH",
+                "BLOCKED_EXECUTION_NOT_READY",
+                "BLOCKED_QUALIFICATION",
+            }:
+                # 状态只有发生变化时才调用一次通知，避免每分钟重复发送相同阻断邮件。
+                event_notifier.send(
+                    event_key=f"signal-status:{signal_summary.status}",
+                    event_title=f"策略状态：{signal_summary.status}",
+                    event_lines=(f"原因：{signal_summary.reason}",),
+                    severity=(
+                        "CRITICAL"
+                        if signal_summary.status == "BLOCKED_MARKET_HEALTH"
+                        else "WARNING"
+                    ),
+                )
+            previous_signal_status = signal_summary.status
+            # 调用成交游标扫描，每一笔新买入、卖出或止损成交各发送一封独立邮件。
+            sent_trade_emails = event_notifier.notify_new_trades()
+            if sent_trade_emails:
+                _runtime_log(f"本轮已发送{sent_trade_emails}封成交邮件")
             # 调用30天监督器汇总完整UTC日；账户未初始化时不会提前启动计时。
-            simulation = refresh_paper_simulation()
+            simulation = refresh_paper_simulation() if safety.approved_qualifications > 0 else None
             if simulation is not None:
                 _runtime_log(
                     f"模拟监督：{simulation.status}，连续健康"
                     f"{simulation.consecutive_healthy_days}/{simulation.required_days}天"
                 )
-            if settings.status_email_to and snapshot_time >= next_status_email_at:
-                message = build_gate_status_email(snapshot_time)
-                delivery_status = "SENT"
-                delivery_error: str | None = None
-                try:
-                    # 调用QQ SSL SMTP发送只读摘要；授权码仅从SecretStr取出并传入内存连接。
-                    send_smtp_email(
-                        message,
-                        host=settings.smtp_host or "",
-                        port=settings.smtp_port,
-                        username=settings.smtp_username or "",
-                        password=(
-                            settings.smtp_password.get_secret_value()
-                            if settings.smtp_password is not None
-                            else ""
-                        ),
-                        sender=settings.smtp_from or "",
-                        recipient=settings.status_email_to,
-                    )
-                except RuntimeError as error:
-                    # 邮件属于旁路通知，发送失败只记日志，绝不让行情轮询进入重试。
-                    delivery_status = "FAILED"
-                    delivery_error = str(error)
-                    _runtime_log(f"四小时邮件报告发送失败：{error}")
-                else:
-                    _runtime_log(f"四小时邮件报告已发送至{settings.status_email_to}")
-                finally:
-                    try:
-                        # 调用MySQL审计仅保存标题和结果，不保存正文、账号或SMTP授权码。
-                        save_email_delivery(
-                            recipient=settings.status_email_to,
-                            subject=message.subject,
-                            status=delivery_status,
-                            attempted_at=snapshot_time,
-                            error_message=delivery_error,
-                        )
-                    except (OSError, RuntimeError, ValueError, SQLAlchemyError) as audit_error:
-                        _runtime_log(f"邮件发送审计保存失败：{audit_error}")
-                    next_status_email_at = snapshot_time + timedelta(
-                        hours=settings.status_email_interval_hours
-                    )
+            else:
+                _runtime_log("新策略尚未通过准入，旧EMA模拟监督不再续期")
 
-        # 调用行情运行器；每轮都刷新账户风控，只有显式开关才追加EMA信号观察。
+        # 调用行情运行器；每轮刷新风控和新布林带信号，并旁路发送生命周期事件邮件。
         runner = MarketDataRunner(
             settings,
             runner_config,
             stop_event=stop_event,
             reporter=_runtime_log,
+            event_reporter=report_runtime_event,
             after_cycle=refresh_gate_risk_and_signals_after_market_cycle,
         )
         _runtime_log("行情服务启动；仅连接Gate测试网，真实交易始终关闭")
@@ -1370,31 +1470,27 @@ def main() -> None:
     if args.command == "paper-signal-cycle":
         # 调用幂等建表，确保信号、准入和行情健康状态表均已存在。
         create_schema()
-        # 调用模拟信号单轮主循环；该方法只保存信号，不构造或提交交易所订单。
-        summary = run_paper_signal_cycle(
-            tuple(args.contracts),
-            tuple(args.intervals),
-            bar_limit=args.bar_limit,
-            entry_executor=lambda **kwargs: execute_approved_paper_entry(
-                settings=settings,
-                **kwargs,
-            ),
-            exit_executor=close_position_for_ema_signal,
-            position_monitor=lambda: monitor_paper_positions(bar_limit=args.bar_limit),
+        # 调用15分钟轨道轮转影子模拟；旧EMA策略不会再由这个Gate命令生成订单。
+        summary = run_bollinger_signal_cycle(
+            symbol="ETH_USDT",
+            bar_limit_5m=args.bar_limit,
+            bar_limit_15m=max(300, args.bar_limit // 3),
         )
-        for stream in summary.streams:
-            print(
-                f"{stream.symbol} {stream.interval}: status={stream.status}, "
-                f"actions={stream.action_count}, new_signals={stream.new_signal_count}, "
-                f"orders={stream.order_count}"
-            )
-            print(f"  原因: {stream.reason}")
+        print(
+            f"ETH_USDT 15m轨道轮转: status={summary.status}, "
+            f"new_signals={summary.new_signal_count}, orders={summary.order_count}"
+        )
+        print(f"  原因: {summary.reason}")
+        print(f"Shadow paper equity: {summary.paper_equity:.2f} USDT")
         print(f"New strategy signals: {summary.new_signal_count}")
         print(f"Paper orders created: {summary.order_count}")
         # 调用30天监督器刷新日度指标；该结论只用于人工复核，不开启真实交易。
-        simulation = refresh_paper_simulation()
+        safety = read_execution_safety_status(oanda_enabled=False)
+        simulation = (
+            refresh_paper_simulation() if safety.approved_qualifications > 0 else None
+        )
         if simulation is None:
-            print("Paper simulation: NOT_STARTED")
+            print("Paper simulation: NOT_STARTED_FOR_ACTIVE_STRATEGY")
         else:
             print(
                 f"Paper simulation: {simulation.status}, healthy_days="
