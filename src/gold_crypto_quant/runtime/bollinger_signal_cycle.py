@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.storage.market_bars import load_market_bars
 from gold_crypto_quant.storage.market_health import refresh_market_health
-from gold_crypto_quant.runtime.bollinger_rotation_simulator import (
-    RotationPaperEvent,
-    run_rotation_paper_cycle,
+from gold_crypto_quant.runtime.bollinger_rotation_simulator import RotationPaperEvent
+from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
+    run_multi_timeframe_paper_cycle,
 )
 
 
@@ -30,27 +30,46 @@ def run_bollinger_signal_cycle(
     bar_limit_5m: int = 500,
     bar_limit_15m: int = 300,
 ) -> BollingerSignalCycleSummary:
-    """运行ETH 15分钟轨道轮转影子账户；永远不创建Gate订单。"""
-    # 当前活动策略只使用15分钟行情，5分钟不再参与箱体判断或成交。
-    health_15m = refresh_market_health(symbol, "15m", venue=GATE_TESTNET_VENUE)
-    if health_15m.status != "HEALTHY":
+    """按5m、15m、30m、1h优先级运行ETH单持仓影子账户。"""
+    health_by_interval = {
+        interval: refresh_market_health(symbol, interval, venue=GATE_TESTNET_VENUE)
+        for interval in ("5m", "15m", "30m", "1h")
+    }
+    unhealthy = [
+        f"{interval}：{health.reason}"
+        for interval, health in health_by_interval.items()
+        if health.status != "HEALTHY"
+    ]
+    if unhealthy:
         return BollingerSignalCycleSummary(
             status="BLOCKED_MARKET_HEALTH",
             new_signal_count=0,
             order_count=0,
-            reason=f"15m：{health_15m.reason}",
+            reason="；".join(unhealthy),
         )
-    bars = load_market_bars(
-        symbol, "15m", limit=max(300, bar_limit_15m), venue=GATE_TESTNET_VENUE
-    )
-    # 调用本地状态机处理停机以来的新K线；该模块没有任何交易所下单方法。
-    paper = run_rotation_paper_cycle(bars)
+    bars_by_interval = {
+        "5m": load_market_bars(
+            symbol, "5m", limit=max(500, bar_limit_5m), venue=GATE_TESTNET_VENUE
+        ),
+        "15m": load_market_bars(
+            symbol, "15m", limit=max(300, bar_limit_15m), venue=GATE_TESTNET_VENUE
+        ),
+        "30m": load_market_bars(
+            symbol, "30m", limit=300, venue=GATE_TESTNET_VENUE
+        ),
+        "1h": load_market_bars(
+            symbol, "1h", limit=300, venue=GATE_TESTNET_VENUE
+        ),
+    }
+    # 调用多周期本地状态机；四个周期共享一个账户，始终最多只有一个方向仓位。
+    paper = run_multi_timeframe_paper_cycle(bars_by_interval)
     entry_count = sum("模拟开仓" in item.title for item in paper.events)
+    interval_status = paper.active_interval or paper.selected_interval or "等待箱体"
     return BollingerSignalCycleSummary(
         status="SHADOW_RUNNING" if paper.status == "RUNNING" else paper.status,
         new_signal_count=entry_count,
         order_count=0,
-        reason=paper.reason,
+        reason=f"{paper.reason}；当前周期：{interval_status}",
         paper_status=paper.status,
         paper_equity=paper.equity,
         paper_events=paper.events,

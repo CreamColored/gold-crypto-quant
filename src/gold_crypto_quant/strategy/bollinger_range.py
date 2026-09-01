@@ -268,12 +268,14 @@ def build_rotation_box_context(
 
 
 def parameters_for_same_timeframe(interval: str) -> BollingerRangeParameters:
-    """返回朋友原始定义中15分钟和5分钟各自的走平点数阈值。"""
+    """返回各同周期模式的三轨连续走平点数阈值。"""
     if interval == "15m":
         return BollingerRangeParameters(maximum_band_drift=2.5)
     if interval == "5m":
         return BollingerRangeParameters(maximum_band_drift=1.0)
-    raise ValueError("same-timeframe Bollinger strategy supports only 5m and 15m")
+    if interval in {"30m", "1h"}:
+        return BollingerRangeParameters(maximum_band_drift=3.0)
+    raise ValueError("same-timeframe Bollinger strategy supports 5m, 15m, 30m and 1h")
 
 
 def evaluate_same_timeframe_next_bar_signal(

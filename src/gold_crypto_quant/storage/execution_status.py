@@ -21,7 +21,7 @@ from gold_crypto_quant.storage.models import (
 )
 
 ACTIVE_STRATEGY_NAME = "BOLLINGER_RANGE"
-ACTIVE_STRATEGY_VERSION = "3.0.0"
+ACTIVE_STRATEGY_VERSION = "4.0.0"
 
 
 @dataclass(frozen=True, slots=True)

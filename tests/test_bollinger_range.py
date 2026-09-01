@@ -106,9 +106,11 @@ def test_same_timeframe_signal_uses_its_own_next_bar(monkeypatch) -> None:
 
 
 def test_same_timeframe_drift_thresholds_are_interval_specific() -> None:
-    # 调用周期参数工厂，确认朋友定义的15分钟2.5点与5分钟1点没有混用。
+    # 调用周期参数工厂，确认四个同周期模式各自使用约定的走平阈值。
     assert parameters_for_same_timeframe("15m").maximum_band_drift == 2.5
     assert parameters_for_same_timeframe("5m").maximum_band_drift == 1.0
+    assert parameters_for_same_timeframe("30m").maximum_band_drift == 3.0
+    assert parameters_for_same_timeframe("1h").maximum_band_drift == 3.0
 
 
 def test_rotation_box_uses_continuous_three_bar_drift() -> None:

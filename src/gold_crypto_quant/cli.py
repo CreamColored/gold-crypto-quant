@@ -1470,14 +1470,14 @@ def main() -> None:
     if args.command == "paper-signal-cycle":
         # 调用幂等建表，确保信号、准入和行情健康状态表均已存在。
         create_schema()
-        # 调用15分钟轨道轮转影子模拟；旧EMA策略不会再由这个Gate命令生成订单。
+        # 调用5m到1h优先级轨道轮转影子模拟；旧EMA策略不再生成订单。
         summary = run_bollinger_signal_cycle(
             symbol="ETH_USDT",
             bar_limit_5m=args.bar_limit,
             bar_limit_15m=max(300, args.bar_limit // 3),
         )
         print(
-            f"ETH_USDT 15m轨道轮转: status={summary.status}, "
+            f"ETH_USDT 多周期轨道轮转: status={summary.status}, "
             f"new_signals={summary.new_signal_count}, orders={summary.order_count}"
         )
         print(f"  原因: {summary.reason}")
