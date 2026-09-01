@@ -331,9 +331,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 从MySQL只读取已经收盘且按时间升序排列的K线。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 运行EMA 20/50/200多空回测；该调用只在内存中计算，不连接交易接口。
                 result, _portfolio = run_ema_backtest(
                     bars,
@@ -358,9 +356,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 从MySQL调用标准行情读取方法，读取前会检查连续性和OHLC合法性。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 先调用正式回测，确保诊断分析的是风控生效后的真实交易序列。
                 _result, portfolio = run_ema_backtest(
                     bars,
@@ -403,9 +399,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，研究前先执行连续性和OHLC质量检查。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 调用时间隔离研究：前70%选择参数，后30%仅做一次样本外验证。
                 research = run_holdout_research(
                     bars,
@@ -439,9 +433,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，所有滚动窗口共享同一份已验证历史数据。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 调用三折扩展窗口研究，每折验证数据都不会参与该折参数选择。
                 try:
                     rolling = run_rolling_research(
@@ -482,9 +474,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，保证滚动研究只使用连续且合法的已收盘K线。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用三折滚动研究，同时评估ADX、高周期确认、冷却期、方向和ATR。
                     # both、long、short必须同时保留，避免研究阶段先验偏向某一个交易方向。
@@ -532,9 +522,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，确保回踩触碰使用的是完整连续的最高价和最低价。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用滚动研究，交叉基线只保留一组，回踩分别研究2、3、5根观察窗口。
                     # 同时保留both、long、short，确保BTC做多候选不会被研究入口提前排除。
@@ -584,9 +572,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，所有判断仅基于按时间排序的已收盘K线。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用三折滚动研究；每折只在训练集比较斜率开关和三档ATR距离。
                     # 方向固定both，避免再次通过历史收益选择固定做多或固定做空。
@@ -641,9 +627,7 @@ def main() -> None:
                     print(f"{contract} {interval}: 跳过，EMA12回踩研究仅支持15m和30m")
                     continue
                 # 调用标准行情读取方法，所有EMA和回踩判断只使用连续、已收盘的历史K线。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用三折滚动研究；只比较ATR止损和1/2/3根回踩观察窗，多空始终同时开启。
                     rolling = run_rolling_research(
@@ -696,9 +680,7 @@ def main() -> None:
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，历史区间完整性仍由统一存储层检查。
-                bars = load_market_bars(
-                    contract, interval, venue=_venue_for_symbol(contract)
-                )
+                bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用三折滚动研究，仅比较10/20/40根突破窗口和三档ATR止损。
                     # 方向固定both，确保最终策略始终符合BTC和ETH多空都做的核心规则。
@@ -768,9 +750,7 @@ def main() -> None:
                 joint = run_joint_breakout_research(
                     bars_by_symbol,
                     interval=interval,
-                    lookbacks=(20, 40)
-                    if research_exits or research_regime
-                    else (10, 20, 40),
+                    lookbacks=(20, 40) if research_exits or research_regime else (10, 20, 40),
                     atr_multiples=(1.5, 2.0, 2.5),
                     take_profit_atr_multiples=(0.0, 2.0, 3.0) if research_exits else (0.0,),
                     trailing_options=(False, True) if research_exits else (False,),
@@ -813,9 +793,7 @@ def main() -> None:
                     )
             stable = "一致" if joint.stable_parameter_set else "不一致"
             for symbol in joint.symbols:
-                minimum_trades = min(
-                    fold.test_results[symbol].trade_count for fold in joint.folds
-                )
+                minimum_trades = min(fold.test_results[symbol].trade_count for fold in joint.folds)
                 passed = (
                     joint.compounded_returns[symbol] > 0
                     and joint.worst_drawdowns[symbol] < joint_config.max_drawdown_limit
@@ -1156,17 +1134,14 @@ def main() -> None:
                 f"Gate账户风控：{risk_state.state}，"
                 f"当日收益{risk_state.daily_return:.2%}，回撤{risk_state.drawdown:.2%}"
             )
-            if (
-                risk_state.state != previous_gate_risk_state
-                and (previous_gate_risk_state is not None or risk_state.state != "NORMAL")
+            if risk_state.state != previous_gate_risk_state and (
+                previous_gate_risk_state is not None or risk_state.state != "NORMAL"
             ):
                 # 调用事件邮件；熔断立即告警，恢复为NORMAL时也发送恢复通知。
                 event_notifier.send(
                     event_key=f"gate-risk:{previous_gate_risk_state}->{risk_state.state}",
                     event_title=(
-                        "Gate账户风控恢复"
-                        if risk_state.state == "NORMAL"
-                        else "Gate账户触发风控"
+                        "Gate账户风控恢复" if risk_state.state == "NORMAL" else "Gate账户触发风控"
                     ),
                     event_lines=(
                         f"原状态：{previous_gate_risk_state or '-'}",
@@ -1193,7 +1168,6 @@ def main() -> None:
                     raise RuntimeError("获准策略存在，但Gate模拟资金账本初始化失败")
             # 调用新的15m与5m独立同周期观察；旧EMA和跨周期信号不再进入订单路径。
             signal_summary = run_bollinger_signal_cycle(
-                symbol="ETH_USDT",
                 bar_limit_5m=args.bar_limit,
                 bar_limit_15m=max(300, args.bar_limit // 3),
             )
@@ -1345,12 +1319,8 @@ def main() -> None:
                     account_id, _ = resolve_oanda_account_id(
                         capability_client, settings.oanda_practice_account_id
                     )
-                    capability_client.get_instrument_rules(
-                        account_id, args.oanda_instrument
-                    )
-                    current_price = capability_client.get_price(
-                        account_id, args.oanda_instrument
-                    )
+                    capability_client.get_instrument_rules(account_id, args.oanda_instrument)
+                    current_price = capability_client.get_price(account_id, args.oanda_instrument)
             except OandaApiError as error:
                 _runtime_log(f"黄金模拟执行门禁：BLOCKED_ACCOUNT_INSTRUMENT，原因：{error}")
                 return
@@ -1365,9 +1335,7 @@ def main() -> None:
             )
             summaries = []
             primary_intervals = tuple(
-                interval
-                for interval in args.intervals
-                if interval == args.oanda_paper_interval
+                interval for interval in args.intervals if interval == args.oanda_paper_interval
             )
             if primary_intervals:
                 # 调用黄金主周期闭环；只读Practice接口提供报价和规则，成交只写本地数据库。
@@ -1395,9 +1363,7 @@ def main() -> None:
                     )
                 )
             shadow_intervals = tuple(
-                interval
-                for interval in args.intervals
-                if interval != args.oanda_paper_interval
+                interval for interval in args.intervals if interval != args.oanda_paper_interval
             )
             if shadow_intervals:
                 # 调用影子周期仅保存信号；不提供执行器，因此不会争抢同一黄金仓位。
@@ -1412,9 +1378,7 @@ def main() -> None:
             streams = tuple(
                 stream for cycle_summary in summaries for stream in cycle_summary.streams
             )
-            blocked_streams = sum(
-                stream.status.startswith("BLOCKED") for stream in streams
-            )
+            blocked_streams = sum(stream.status.startswith("BLOCKED") for stream in streams)
             new_signal_count = sum(summary.new_signal_count for summary in summaries)
             order_count = sum(summary.order_count for summary in summaries)
             _runtime_log(
@@ -1445,8 +1409,9 @@ def main() -> None:
         )
         _runtime_log("OANDA黄金行情服务启动；仅连接Practice，真实交易始终关闭")
         # 调用独立文件锁和信号处理器，确保不与Gate服务争用锁且停止时完整收尾。
-        with SingleInstanceLock(args.oanda_lock_file), install_shutdown_signal_handlers(
-            oanda_stop_event
+        with (
+            SingleInstanceLock(args.oanda_lock_file),
+            install_shutdown_signal_handlers(oanda_stop_event),
         ):
             result = oanda_runner.run()
         _runtime_log(f"OANDA黄金行情服务已安全停止，成功轮询{result.successful_cycles}轮")
@@ -1472,12 +1437,11 @@ def main() -> None:
         create_schema()
         # 调用5m到1h优先级轨道轮转影子模拟；旧EMA策略不再生成订单。
         summary = run_bollinger_signal_cycle(
-            symbol="ETH_USDT",
             bar_limit_5m=args.bar_limit,
             bar_limit_15m=max(300, args.bar_limit // 3),
         )
         print(
-            f"ETH_USDT 多周期轨道轮转: status={summary.status}, "
+            f"BTC_USDT/ETH_USDT 多周期共享轨道轮转: status={summary.status}, "
             f"new_signals={summary.new_signal_count}, orders={summary.order_count}"
         )
         print(f"  原因: {summary.reason}")
@@ -1486,9 +1450,7 @@ def main() -> None:
         print(f"Paper orders created: {summary.order_count}")
         # 调用30天监督器刷新日度指标；该结论只用于人工复核，不开启真实交易。
         safety = read_execution_safety_status(oanda_enabled=False)
-        simulation = (
-            refresh_paper_simulation() if safety.approved_qualifications > 0 else None
-        )
+        simulation = refresh_paper_simulation() if safety.approved_qualifications > 0 else None
         if simulation is None:
             print("Paper simulation: NOT_STARTED_FOR_ACTIVE_STRATEGY")
         else:
