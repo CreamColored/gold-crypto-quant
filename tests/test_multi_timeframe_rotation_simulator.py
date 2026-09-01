@@ -7,6 +7,7 @@ import pandas as pd
 
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     INTERVAL_PRIORITY,
+    _middle_reduction_trigger,
     run_multi_timeframe_paper_cycle,
 )
 from gold_crypto_quant.strategy.bollinger_range import (
@@ -21,6 +22,16 @@ LAST_OPEN = {
     "30m": "2026-01-01 11:30",
     "1h": "2026-01-01 11:00",
 }
+
+
+def test_wide_rotation_reduces_two_points_before_middle() -> None:
+    assert _middle_reduction_trigger("LONG", 80.0, 100.0, 1.0) == (98.0, 2.0)
+    assert _middle_reduction_trigger("SHORT", 120.0, 100.0, 1.0) == (102.0, 2.0)
+
+
+def test_narrow_rotation_waits_for_exact_middle() -> None:
+    assert _middle_reduction_trigger("LONG", 95.0, 100.0, 1.0) == (100.0, 0.0)
+    assert _middle_reduction_trigger("SHORT", 105.0, 100.0, 1.0) == (100.0, 0.0)
 
 
 def _bars_by_interval() -> dict[str, pd.DataFrame]:

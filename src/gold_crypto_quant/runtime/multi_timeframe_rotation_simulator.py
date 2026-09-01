@@ -13,7 +13,7 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-MULTI_ROTATION_STRATEGY_VERSION = "5.0.0"
+MULTI_ROTATION_STRATEGY_VERSION = "5.1.0"
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 SYMBOL_PRIORITY = ("BTC_USDT", "ETH_USDT")
 INTERVAL_DURATION = {
@@ -50,6 +50,9 @@ class MultiTimeframePaperState:
     entry_fee_remaining: float = 0.0
     trade_net_pnl: float = 0.0
     middle_reduced: bool = False
+    middle_reference_price: float = 0.0
+    middle_trigger_price: float = 0.0
+    middle_advance_distance: float = 0.0
     daily_blocked: bool = False
     permanent_fuse: bool = False
 
@@ -127,6 +130,19 @@ def _parameters_for_symbol(
         fixed_stop_distance=parameters.fixed_stop_distance * price_scale,
         minimum_bandwidth=parameters.minimum_bandwidth * price_scale,
     )
+
+
+def _middle_reduction_trigger(
+    side: str,
+    entry_price: float,
+    middle_price: float,
+    point_scale: float,
+) -> tuple[float, float]:
+    """返回中轨减仓触发价和提前点数；宽波段提前，窄波段保持原中轨。"""
+    distance = abs(entry_price - middle_price)
+    advance = 2.0 * point_scale if distance >= 10.0 * point_scale else 0.0
+    trigger = middle_price - advance if side == "LONG" else middle_price + advance
+    return trigger, advance
 
 
 def run_multi_timeframe_paper_cycle(
@@ -242,6 +258,7 @@ def run_multi_timeframe_paper_cycle(
         symbol: str,
         interval: str,
         reference: float,
+        middle_reference: float,
         timestamp: pd.Timestamp,
         reason: str,
     ) -> None:
@@ -267,6 +284,21 @@ def run_multi_timeframe_paper_cycle(
         state.equity -= state.entry_fee_remaining
         state.trade_net_pnl = 0.0
         state.middle_reduced = False
+        point_scale = parameters.fixed_stop_distance / 5.0
+        middle_trigger, middle_advance = _middle_reduction_trigger(
+            side,
+            reference,
+            middle_reference,
+            point_scale,
+        )
+        state.middle_reference_price = middle_reference
+        state.middle_trigger_price = middle_trigger
+        state.middle_advance_distance = middle_advance
+        reduction_rule = (
+            f"距离中轨较远，提前{middle_advance:.2f}点"
+            if middle_advance > 0
+            else "距离中轨不足阈值，触碰中轨"
+        )
         add_event(
             timestamp,
             f"模拟开仓：{'买入做多' if side == 'LONG' else '卖出做空'}",
@@ -276,6 +308,8 @@ def run_multi_timeframe_paper_cycle(
             f"轨道限价：{reference:.2f}",
             f"数量：{state.quantity:.6f} {symbol.split('_', 1)[0]}",
             f"保护止损：{state.stop_price:.2f}",
+            f"中轨参考价：{middle_reference:.2f}",
+            f"减仓触发价：{middle_trigger:.2f}（{reduction_rule}）",
             f"影子权益：{state.equity:.2f} USDT",
         )
 
@@ -398,7 +432,7 @@ def run_multi_timeframe_paper_cycle(
                 state.position_side == "SHORT" and float(bar["low"]) <= lower
             )
             if stop_hit:
-                stop_reason = "中轨减仓后的保护止损" if state.middle_reduced else "固定5点止损"
+                stop_reason = "中轨减仓后的保本止损" if state.middle_reduced else "固定保护止损"
                 close_quantity(
                     state.remaining_quantity,
                     state.stop_price,
@@ -416,15 +450,21 @@ def run_multi_timeframe_paper_cycle(
                 state.box_active[stopped_symbol][stopped_interval] = False
                 state.reset_streak[stopped_symbol][stopped_interval] = 0
             else:
-                middle_hit = (state.position_side == "LONG" and float(bar["high"]) >= middle) or (
-                    state.position_side == "SHORT" and float(bar["low"]) <= middle
-                )
+                middle_trigger = state.middle_trigger_price or middle
+                middle_hit = (
+                    state.position_side == "LONG" and float(bar["high"]) >= middle_trigger
+                ) or (state.position_side == "SHORT" and float(bar["low"]) <= middle_trigger)
                 if middle_hit and not state.middle_reduced and not target_hit:
+                    middle_reason = (
+                        f"距离中轨{state.middle_advance_distance:.2f}点提前减仓50%"
+                        if state.middle_advance_distance > 0
+                        else "到达中轨减仓50%"
+                    )
                     close_quantity(
                         state.remaining_quantity * 0.5,
-                        middle,
+                        middle_trigger,
                         pd.Timestamp(bars.index[position]),
-                        "到达中轨减仓50%",
+                        middle_reason,
                         market=False,
                     )
                     batch_had_trade = True
@@ -459,6 +499,7 @@ def run_multi_timeframe_paper_cycle(
                             symbol,
                             interval,
                             target,
+                            middle,
                             pd.Timestamp(bars.index[position]),
                             "对侧轨止盈后同周期立即反手",
                         )
@@ -517,6 +558,7 @@ def run_multi_timeframe_paper_cycle(
                         symbol,
                         interval,
                         reference,
+                        float(previous["bb_middle"]),
                         pd.Timestamp(bars.index[position]),
                         f"按周期优先、BTC→ETH品种顺序选中{symbol} {interval}箱体并触轨",
                     )
