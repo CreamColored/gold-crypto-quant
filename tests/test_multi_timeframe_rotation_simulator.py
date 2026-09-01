@@ -109,7 +109,7 @@ def test_multi_timeframe_falls_back_to_15m_when_5m_is_not_sideways(tmp_path) -> 
     assert sum("模拟开仓" in event.title for event in summary.events) == 1
 
 
-def test_multi_symbol_uses_one_account_and_prefers_btc_on_same_interval(
+def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
     tmp_path,
 ) -> None:
     btc = _bars_by_interval()
@@ -129,17 +129,19 @@ def test_multi_symbol_uses_one_account_and_prefers_btc_on_same_interval(
             float(context.iloc[-2]["bb_upper"]) + 0.5
         )
 
-    # BTC和ETH同周期同时触轨时只能开一笔；固定品种顺序选择BTC。
+    # BTC和ETH同周期同时触轨时各开一笔，但仍共享同一份账户权益。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
         state_path=state_path,
     )
 
-    assert summary.position_side == "SHORT"
-    assert summary.active_symbol == "BTC_USDT"
-    assert summary.active_interval == "5m"
-    assert sum("模拟开仓" in event.title for event in summary.events) == 1
-    assert any("品种：BTC_USDT" in line for line in summary.events[0].lines)
+    assert summary.position_side == "MULTIPLE"
+    assert summary.active_symbol == "BTC_USDT,ETH_USDT"
+    assert summary.active_interval == "5m,5m"
+    assert sum("模拟开仓" in event.title for event in summary.events) == 2
+    event_lines = [line for event in summary.events for line in event.lines]
+    assert "品种：BTC_USDT" in event_lines
+    assert "品种：ETH_USDT" in event_lines
 
 
 def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
@@ -157,9 +159,8 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
         state_path=state_path,
     )
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state.update(
+    state["positions"]["BTC_USDT"].update(
         {
-            "position_symbol": "BTC_USDT",
             "position_side": "SHORT",
             "active_interval": "30m",
             "quantity": 1.0,
@@ -172,20 +173,27 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
     btc["30m"].iloc[-1, btc["30m"].columns.get_loc("high")] = 106.0
-    eth_context = build_rotation_box_context(eth["15m"], parameters_for_same_timeframe("15m"))
-    eth["15m"].iloc[-1, eth["15m"].columns.get_loc("high")] = (
+    btc_context = build_rotation_box_context(btc["15m"], parameters_for_same_timeframe("15m"))
+    btc["15m"].iloc[-1, btc["15m"].columns.get_loc("high")] = (
+        float(btc_context.iloc[-2]["bb_upper"]) + 0.5
+    )
+    eth_context = build_rotation_box_context(eth["5m"], parameters_for_same_timeframe("5m"))
+    eth["5m"].iloc[-1, eth["5m"].columns.get_loc("high")] = (
         float(eth_context.iloc[-2]["bb_upper"]) + 0.5
     )
 
-    # 30m止损已占用本批次；即使ETH 15m同时触轨，本轮也必须保持空仓观察。
+    # BTC 30m止损后不能切到BTC 15m；ETH是独立品种，仍允许正常开仓。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
         state_path=state_path,
     )
 
-    assert summary.position_side == ""
+    assert summary.position_side == "SHORT"
+    assert summary.active_symbol == "ETH_USDT"
     assert sum("模拟平仓" in event.title for event in summary.events) == 1
-    assert not any("模拟开仓" in event.title for event in summary.events)
+    open_events = [event for event in summary.events if "模拟开仓" in event.title]
+    assert len(open_events) == 1
+    assert "品种：ETH_USDT" in open_events[0].lines
 
 
 def test_target_does_not_reverse_when_current_bar_invalidates_box(tmp_path) -> None:
@@ -193,9 +201,8 @@ def test_target_does_not_reverse_when_current_bar_invalidates_box(tmp_path) -> N
     state_path = tmp_path / "broken-box.json"
     _initialize(bars_by_interval, state_path)
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state.update(
+    state["positions"]["ETH_USDT"].update(
         {
-            "position_symbol": "ETH_USDT",
             "position_side": "SHORT",
             "active_interval": "30m",
             "quantity": 1.0,

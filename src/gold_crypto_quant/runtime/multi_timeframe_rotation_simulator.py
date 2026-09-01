@@ -13,7 +13,7 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-MULTI_ROTATION_STRATEGY_VERSION = "5.1.0"
+MULTI_ROTATION_STRATEGY_VERSION = "5.2.0"
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 SYMBOL_PRIORITY = ("BTC_USDT", "ETH_USDT")
 INTERVAL_DURATION = {
@@ -28,19 +28,9 @@ ETH_RULE_REFERENCE_PRICE = 2_500.0
 
 
 @dataclass(slots=True)
-class MultiTimeframePaperState:
-    """跨周期共享资金和持仓、各周期独立箱体状态。"""
+class SymbolPaperPositionState:
+    """单一品种跨周期共享的唯一仓位状态。"""
 
-    strategy_version: str = MULTI_ROTATION_STRATEGY_VERSION
-    equity: float = 10_000.0
-    peak_equity: float = 10_000.0
-    day_start_equity: float = 10_000.0
-    current_day: str = ""
-    last_bar_times: dict[str, dict[str, str]] = field(default_factory=dict)
-    box_active: dict[str, dict[str, bool]] = field(default_factory=dict)
-    blocked_after_stop: dict[str, dict[str, bool]] = field(default_factory=dict)
-    reset_streak: dict[str, dict[str, int]] = field(default_factory=dict)
-    position_symbol: str = ""
     position_side: str = ""
     active_interval: str = ""
     quantity: float = 0.0
@@ -53,6 +43,22 @@ class MultiTimeframePaperState:
     middle_reference_price: float = 0.0
     middle_trigger_price: float = 0.0
     middle_advance_distance: float = 0.0
+
+
+@dataclass(slots=True)
+class MultiTimeframePaperState:
+    """BTC/ETH共享资金，但每个品种各自最多持有一笔仓位。"""
+
+    strategy_version: str = MULTI_ROTATION_STRATEGY_VERSION
+    equity: float = 10_000.0
+    peak_equity: float = 10_000.0
+    day_start_equity: float = 10_000.0
+    current_day: str = ""
+    last_bar_times: dict[str, dict[str, str]] = field(default_factory=dict)
+    box_active: dict[str, dict[str, bool]] = field(default_factory=dict)
+    blocked_after_stop: dict[str, dict[str, bool]] = field(default_factory=dict)
+    reset_streak: dict[str, dict[str, int]] = field(default_factory=dict)
+    positions: dict[str, SymbolPaperPositionState] = field(default_factory=dict)
     daily_blocked: bool = False
     permanent_fuse: bool = False
 
@@ -88,6 +94,7 @@ def _new_state(initial_equity: float, symbols: tuple[str, ...]) -> MultiTimefram
         reset_streak={
             symbol: {interval: 0 for interval in INTERVAL_PRIORITY} for symbol in symbols
         },
+        positions={symbol: SymbolPaperPositionState() for symbol in symbols},
     )
 
 
@@ -95,7 +102,12 @@ def _load_state(path: Path) -> MultiTimeframePaperState | None:
     """读取V5多品种状态；不存在时由首次调用建立新账户。"""
     if not path.exists():
         return None
-    state = MultiTimeframePaperState(**json.loads(path.read_text(encoding="utf-8")))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_positions = payload.pop("positions", {})
+    state = MultiTimeframePaperState(**payload)
+    state.positions = {
+        symbol: SymbolPaperPositionState(**position) for symbol, position in raw_positions.items()
+    }
     if state.strategy_version != MULTI_ROTATION_STRATEGY_VERSION:
         raise RuntimeError("multi-timeframe paper state strategy version mismatch")
     return state
@@ -262,28 +274,28 @@ def run_multi_timeframe_paper_cycle(
         timestamp: pd.Timestamp,
         reason: str,
     ) -> None:
-        """按全账户0.25%风险建立唯一仓位，并记录该仓位所属周期。"""
+        """按全账户0.25%风险建立该品种唯一仓位。"""
         parameters = parameters_by_market[symbol][interval]
-        state.position_side = side
-        state.position_symbol = symbol
-        state.active_interval = interval
-        state.entry_price = reference
-        state.stop_price = (
+        position = state.positions[symbol]
+        position.position_side = side
+        position.active_interval = interval
+        position.entry_price = reference
+        position.stop_price = (
             reference - parameters.fixed_stop_distance
             if side == "LONG"
             else reference + parameters.fixed_stop_distance
         )
-        stop_fill = state.stop_price * (
+        stop_fill = position.stop_price * (
             1.0 - stop_slippage_rate if side == "LONG" else 1.0 + stop_slippage_rate
         )
         adverse_loss = reference - stop_fill if side == "LONG" else stop_fill - reference
         loss_per_unit = adverse_loss + reference * maker_fee_rate + stop_fill * taker_fee_rate
-        state.quantity = state.equity * risk_per_trade / loss_per_unit
-        state.remaining_quantity = state.quantity
-        state.entry_fee_remaining = reference * state.quantity * maker_fee_rate
-        state.equity -= state.entry_fee_remaining
-        state.trade_net_pnl = 0.0
-        state.middle_reduced = False
+        position.quantity = state.equity * risk_per_trade / loss_per_unit
+        position.remaining_quantity = position.quantity
+        position.entry_fee_remaining = reference * position.quantity * maker_fee_rate
+        state.equity -= position.entry_fee_remaining
+        position.trade_net_pnl = 0.0
+        position.middle_reduced = False
         point_scale = parameters.fixed_stop_distance / 5.0
         middle_trigger, middle_advance = _middle_reduction_trigger(
             side,
@@ -291,9 +303,9 @@ def run_multi_timeframe_paper_cycle(
             middle_reference,
             point_scale,
         )
-        state.middle_reference_price = middle_reference
-        state.middle_trigger_price = middle_trigger
-        state.middle_advance_distance = middle_advance
+        position.middle_reference_price = middle_reference
+        position.middle_trigger_price = middle_trigger
+        position.middle_advance_distance = middle_advance
         reduction_rule = (
             f"距离中轨较远，提前{middle_advance:.2f}点"
             if middle_advance > 0
@@ -306,14 +318,15 @@ def run_multi_timeframe_paper_cycle(
             interval,
             f"原因：{reason}",
             f"轨道限价：{reference:.2f}",
-            f"数量：{state.quantity:.6f} {symbol.split('_', 1)[0]}",
-            f"保护止损：{state.stop_price:.2f}",
+            f"数量：{position.quantity:.6f} {symbol.split('_', 1)[0]}",
+            f"保护止损：{position.stop_price:.2f}",
             f"中轨参考价：{middle_reference:.2f}",
             f"减仓触发价：{middle_trigger:.2f}（{reduction_rule}）",
             f"影子权益：{state.equity:.2f} USDT",
         )
 
     def close_quantity(
+        symbol: str,
         quantity: float,
         reference: float,
         timestamp: pd.Timestamp,
@@ -321,13 +334,13 @@ def run_multi_timeframe_paper_cycle(
         *,
         market: bool,
     ) -> None:
-        """模拟唯一仓位的减仓或平仓，并把成本和盈亏计入共享权益。"""
-        symbol = state.position_symbol
-        interval = state.active_interval
+        """模拟指定品种的减仓或平仓，并把成本和盈亏计入共享权益。"""
+        position = state.positions[symbol]
+        interval = position.active_interval
         if market:
             fill = reference * (
                 1.0 - stop_slippage_rate
-                if state.position_side == "LONG"
+                if position.position_side == "LONG"
                 else 1.0 + stop_slippage_rate
             )
             fee_rate = taker_fee_rate
@@ -335,26 +348,28 @@ def run_multi_timeframe_paper_cycle(
             fill = reference
             fee_rate = maker_fee_rate
         gross = (
-            (fill - state.entry_price) * quantity
-            if state.position_side == "LONG"
-            else (state.entry_price - fill) * quantity
+            (fill - position.entry_price) * quantity
+            if position.position_side == "LONG"
+            else (position.entry_price - fill) * quantity
         )
-        allocated_entry_fee = state.entry_fee_remaining * (quantity / state.remaining_quantity)
+        allocated_entry_fee = position.entry_fee_remaining * (
+            quantity / position.remaining_quantity
+        )
         exit_fee = fill * quantity * fee_rate
         net = gross - allocated_entry_fee - exit_fee
         state.equity += gross - exit_fee
-        state.trade_net_pnl += net
-        state.entry_fee_remaining -= allocated_entry_fee
-        state.remaining_quantity -= quantity
+        position.trade_net_pnl += net
+        position.entry_fee_remaining -= allocated_entry_fee
+        position.remaining_quantity -= quantity
         add_event(
             timestamp,
-            f"模拟{'减仓' if state.remaining_quantity > 1e-12 else '平仓'}：{reason}",
+            f"模拟{'减仓' if position.remaining_quantity > 1e-12 else '平仓'}：{reason}",
             symbol,
             interval,
-            f"方向：{state.position_side}",
+            f"方向：{position.position_side}",
             f"成交参考价：{fill:.2f}",
             f"本次净盈亏：{net:+.2f} USDT",
-            f"整笔累计净盈亏：{state.trade_net_pnl:+.2f} USDT",
+            f"整笔累计净盈亏：{position.trade_net_pnl:+.2f} USDT",
             f"影子权益：{state.equity:.2f} USDT",
             severity="WARNING" if net < 0 else "INFO",
         )
@@ -379,7 +394,7 @@ def run_multi_timeframe_paper_cycle(
             grouped[close_time],
             key=lambda item: (INTERVAL_PRIORITY.index(item[1]), symbols.index(item[0])),
         )
-        batch_had_trade = False
+        batch_traded_symbols: set[str] = set()
         beijing_day = str(close_time.tz_convert("Asia/Shanghai").date())
         if state.current_day != beijing_day:
             state.current_day = beijing_day
@@ -407,17 +422,20 @@ def run_multi_timeframe_paper_cycle(
             elif bool(previous["box_candidate"]) and not state.permanent_fuse:
                 state.box_active[symbol][interval] = True
 
-        # 已有仓位只由其开仓周期管理，其他周期不能同时开相反仓位。
-        active_item = next(
-            (
-                item
-                for item in batch
-                if item[0] == state.position_symbol and item[1] == state.active_interval
-            ),
-            None,
-        )
-        if state.position_side and active_item is not None:
-            symbol, interval, position = active_item
+        # BTC和ETH各自管理唯一仓位；一个品种的动作不阻止另一个品种独立交易。
+        for symbol in symbols:
+            symbol_position = state.positions[symbol]
+            active_item = next(
+                (
+                    item
+                    for item in batch
+                    if item[0] == symbol and item[1] == symbol_position.active_interval
+                ),
+                None,
+            )
+            if not symbol_position.position_side or active_item is None:
+                continue
+            _, interval, position = active_item
             bars = bars_by_symbol[symbol][interval]
             bar = bars.iloc[position]
             previous = contexts[symbol][interval].iloc[position - 1]
@@ -426,168 +444,178 @@ def run_multi_timeframe_paper_cycle(
             middle = float(previous["bb_middle"])
             lower = float(previous["bb_lower"])
             stop_hit = (
-                state.position_side == "LONG" and float(bar["low"]) <= state.stop_price
-            ) or (state.position_side == "SHORT" and float(bar["high"]) >= state.stop_price)
-            target_hit = (state.position_side == "LONG" and float(bar["high"]) >= upper) or (
-                state.position_side == "SHORT" and float(bar["low"]) <= lower
+                symbol_position.position_side == "LONG"
+                and float(bar["low"]) <= symbol_position.stop_price
+            ) or (
+                symbol_position.position_side == "SHORT"
+                and float(bar["high"]) >= symbol_position.stop_price
             )
+            target_hit = (
+                symbol_position.position_side == "LONG" and float(bar["high"]) >= upper
+            ) or (symbol_position.position_side == "SHORT" and float(bar["low"]) <= lower)
             if stop_hit:
-                stop_reason = "中轨减仓后的保本止损" if state.middle_reduced else "固定保护止损"
+                stop_reason = (
+                    "中轨减仓后的保本止损" if symbol_position.middle_reduced else "固定保护止损"
+                )
+                stopped_interval = symbol_position.active_interval
                 close_quantity(
-                    state.remaining_quantity,
-                    state.stop_price,
+                    symbol,
+                    symbol_position.remaining_quantity,
+                    symbol_position.stop_price,
                     pd.Timestamp(bars.index[position]),
                     stop_reason,
                     market=True,
                 )
-                batch_had_trade = True
-                stopped_symbol = state.position_symbol
-                stopped_interval = state.active_interval
-                state.position_side = ""
-                state.position_symbol = ""
-                state.active_interval = ""
-                state.blocked_after_stop[stopped_symbol][stopped_interval] = True
-                state.box_active[stopped_symbol][stopped_interval] = False
-                state.reset_streak[stopped_symbol][stopped_interval] = 0
-            else:
-                middle_trigger = state.middle_trigger_price or middle
-                middle_hit = (
-                    state.position_side == "LONG" and float(bar["high"]) >= middle_trigger
-                ) or (state.position_side == "SHORT" and float(bar["low"]) <= middle_trigger)
-                if middle_hit and not state.middle_reduced and not target_hit:
-                    middle_reason = (
-                        f"距离中轨{state.middle_advance_distance:.2f}点提前减仓50%"
-                        if state.middle_advance_distance > 0
-                        else "到达中轨减仓50%"
-                    )
-                    close_quantity(
-                        state.remaining_quantity * 0.5,
-                        middle_trigger,
-                        pd.Timestamp(bars.index[position]),
-                        middle_reason,
-                        market=False,
-                    )
-                    batch_had_trade = True
-                    state.middle_reduced = True
-                    state.stop_price = state.entry_price
-                if target_hit and state.position_side:
-                    old_side = state.position_side
-                    target = upper if old_side == "LONG" else lower
-                    close_quantity(
-                        state.remaining_quantity,
-                        target,
-                        pd.Timestamp(bars.index[position]),
-                        "到达对侧轨止盈",
-                        market=False,
-                    )
-                    batch_had_trade = True
-                    state.position_side = ""
-                    # 当前K线仍然保持箱体才允许同品种、同周期反手；破轨只止盈。
-                    current_box_valid = bool(current["box_candidate"]) and not bool(
-                        current["breakout"]
-                    )
-                    if (
-                        current_box_valid
-                        and state.box_active[symbol][interval]
-                        and not state.blocked_after_stop[symbol][interval]
-                        and not state.daily_blocked
-                        and not state.permanent_fuse
-                    ):
-                        new_side = "SHORT" if old_side == "LONG" else "LONG"
-                        open_position(
-                            new_side,
-                            symbol,
-                            interval,
-                            target,
-                            middle,
-                            pd.Timestamp(bars.index[position]),
-                            "对侧轨止盈后同周期立即反手",
-                        )
-                        immediate_stop = (
-                            new_side == "LONG" and float(bar["low"]) <= state.stop_price
-                        ) or (new_side == "SHORT" and float(bar["high"]) >= state.stop_price)
-                        if immediate_stop:
-                            close_quantity(
-                                state.remaining_quantity,
-                                state.stop_price,
-                                pd.Timestamp(bars.index[position]),
-                                "反手后同根K线止损",
-                                market=True,
-                            )
-                            state.position_side = ""
-                            state.position_symbol = ""
-                            state.active_interval = ""
-                            state.blocked_after_stop[symbol][interval] = True
-                            state.box_active[symbol][interval] = False
-                            state.reset_streak[symbol][interval] = 0
-                    else:
-                        state.position_symbol = ""
-                        state.active_interval = ""
+                batch_traded_symbols.add(symbol)
+                symbol_position.position_side = ""
+                symbol_position.active_interval = ""
+                state.blocked_after_stop[symbol][stopped_interval] = True
+                state.box_active[symbol][stopped_interval] = False
+                state.reset_streak[symbol][stopped_interval] = 0
+                continue
 
-        # 空仓时按固定优先级选本批次中第一个有效周期，绝不多空双开。
-        if (
-            not state.position_side
-            and not batch_had_trade
-            and not state.daily_blocked
-            and not state.permanent_fuse
-        ):
+            middle_trigger = symbol_position.middle_trigger_price or middle
+            middle_hit = (
+                symbol_position.position_side == "LONG" and float(bar["high"]) >= middle_trigger
+            ) or (symbol_position.position_side == "SHORT" and float(bar["low"]) <= middle_trigger)
+            if middle_hit and not symbol_position.middle_reduced and not target_hit:
+                middle_reason = (
+                    f"距离中轨{symbol_position.middle_advance_distance:.2f}点提前减仓50%"
+                    if symbol_position.middle_advance_distance > 0
+                    else "到达中轨减仓50%"
+                )
+                close_quantity(
+                    symbol,
+                    symbol_position.remaining_quantity * 0.5,
+                    middle_trigger,
+                    pd.Timestamp(bars.index[position]),
+                    middle_reason,
+                    market=False,
+                )
+                batch_traded_symbols.add(symbol)
+                symbol_position.middle_reduced = True
+                symbol_position.stop_price = symbol_position.entry_price
+            if target_hit and symbol_position.position_side:
+                old_side = symbol_position.position_side
+                target = upper if old_side == "LONG" else lower
+                close_quantity(
+                    symbol,
+                    symbol_position.remaining_quantity,
+                    target,
+                    pd.Timestamp(bars.index[position]),
+                    "到达对侧轨止盈",
+                    market=False,
+                )
+                batch_traded_symbols.add(symbol)
+                symbol_position.position_side = ""
+                current_box_valid = bool(current["box_candidate"]) and not bool(current["breakout"])
+                if (
+                    current_box_valid
+                    and state.box_active[symbol][interval]
+                    and not state.blocked_after_stop[symbol][interval]
+                    and not state.daily_blocked
+                    and not state.permanent_fuse
+                ):
+                    new_side = "SHORT" if old_side == "LONG" else "LONG"
+                    open_position(
+                        new_side,
+                        symbol,
+                        interval,
+                        target,
+                        middle,
+                        pd.Timestamp(bars.index[position]),
+                        "对侧轨止盈后同周期立即反手",
+                    )
+                    immediate_stop = (
+                        new_side == "LONG" and float(bar["low"]) <= symbol_position.stop_price
+                    ) or (new_side == "SHORT" and float(bar["high"]) >= symbol_position.stop_price)
+                    if immediate_stop:
+                        close_quantity(
+                            symbol,
+                            symbol_position.remaining_quantity,
+                            symbol_position.stop_price,
+                            pd.Timestamp(bars.index[position]),
+                            "反手后同根K线止损",
+                            market=True,
+                        )
+                        symbol_position.position_side = ""
+                        symbol_position.active_interval = ""
+                        state.blocked_after_stop[symbol][interval] = True
+                        state.box_active[symbol][interval] = False
+                        state.reset_streak[symbol][interval] = 0
+                else:
+                    symbol_position.active_interval = ""
+
+        # 每个空仓品种分别按5m→15m→30m→1h选择，品种之间允许同时开仓。
+        for symbol in symbols:
+            symbol_position = state.positions[symbol]
+            if (
+                symbol_position.position_side
+                or symbol in batch_traded_symbols
+                or state.daily_blocked
+                or state.permanent_fuse
+            ):
+                continue
             selected_item = next(
                 (
-                    (symbol, interval, position)
-                    for symbol, interval, position in batch
-                    if position >= 1
+                    (interval, position)
+                    for item_symbol, interval, position in batch
+                    if item_symbol == symbol
+                    and position >= 1
                     and state.box_active[symbol][interval]
                     and not state.blocked_after_stop[symbol][interval]
                 ),
                 None,
             )
-            if selected_item is not None:
-                symbol, interval, position = selected_item
-                bars = bars_by_symbol[symbol][interval]
-                bar = bars.iloc[position]
-                previous = contexts[symbol][interval].iloc[position - 1]
-                upper = float(previous["bb_upper"])
-                lower = float(previous["bb_lower"])
-                touched_upper = float(bar["high"]) >= upper
-                touched_lower = float(bar["low"]) <= lower
-                if touched_upper != touched_lower:
-                    side = "SHORT" if touched_upper else "LONG"
-                    reference = upper if touched_upper else lower
-                    open_position(
-                        side,
-                        symbol,
-                        interval,
-                        reference,
-                        float(previous["bb_middle"]),
-                        pd.Timestamp(bars.index[position]),
-                        f"按周期优先、BTC→ETH品种顺序选中{symbol} {interval}箱体并触轨",
-                    )
-                    batch_had_trade = True
-                    immediate_stop = (side == "LONG" and float(bar["low"]) <= state.stop_price) or (
-                        side == "SHORT" and float(bar["high"]) >= state.stop_price
-                    )
-                    if immediate_stop:
-                        close_quantity(
-                            state.remaining_quantity,
-                            state.stop_price,
-                            pd.Timestamp(bars.index[position]),
-                            "触轨开仓后同根K线止损",
-                            market=True,
-                        )
-                        state.position_side = ""
-                        state.position_symbol = ""
-                        state.active_interval = ""
-                        state.blocked_after_stop[symbol][interval] = True
-                        state.box_active[symbol][interval] = False
-                        state.reset_streak[symbol][interval] = 0
+            if selected_item is None:
+                continue
+            interval, position = selected_item
+            bars = bars_by_symbol[symbol][interval]
+            bar = bars.iloc[position]
+            previous = contexts[symbol][interval].iloc[position - 1]
+            upper = float(previous["bb_upper"])
+            lower = float(previous["bb_lower"])
+            touched_upper = float(bar["high"]) >= upper
+            touched_lower = float(bar["low"]) <= lower
+            if touched_upper == touched_lower:
+                continue
+            side = "SHORT" if touched_upper else "LONG"
+            reference = upper if touched_upper else lower
+            open_position(
+                side,
+                symbol,
+                interval,
+                reference,
+                float(previous["bb_middle"]),
+                pd.Timestamp(bars.index[position]),
+                f"按5m→15m→30m→1h选中{symbol} {interval}箱体并触轨",
+            )
+            batch_traded_symbols.add(symbol)
+            immediate_stop = (
+                side == "LONG" and float(bar["low"]) <= symbol_position.stop_price
+            ) or (side == "SHORT" and float(bar["high"]) >= symbol_position.stop_price)
+            if immediate_stop:
+                close_quantity(
+                    symbol,
+                    symbol_position.remaining_quantity,
+                    symbol_position.stop_price,
+                    pd.Timestamp(bars.index[position]),
+                    "触轨开仓后同根K线止损",
+                    market=True,
+                )
+                symbol_position.position_side = ""
+                symbol_position.active_interval = ""
+                state.blocked_after_stop[symbol][interval] = True
+                state.box_active[symbol][interval] = False
+                state.reset_streak[symbol][interval] = 0
 
         if state.equity / state.day_start_equity - 1.0 <= -0.02:
             if not state.daily_blocked:
                 add_event(
                     close_time,
                     "模拟账户触发每日亏损熔断",
-                    state.position_symbol or "ACCOUNT",
-                    state.active_interval or "ACCOUNT",
+                    "ACCOUNT",
+                    "ACCOUNT",
                     f"当日权益变化：{state.equity / state.day_start_equity - 1.0:.2%}",
                     severity="CRITICAL",
                 )
@@ -599,8 +627,8 @@ def run_multi_timeframe_paper_cycle(
             add_event(
                 close_time,
                 "模拟账户触发8%最大回撤熔断",
-                state.position_symbol or "ACCOUNT",
-                state.active_interval or "ACCOUNT",
+                "ACCOUNT",
+                "ACCOUNT",
                 f"当前回撤：{drawdown:.2%}",
                 severity="CRITICAL",
             )
@@ -620,15 +648,20 @@ def run_multi_timeframe_paper_cycle(
         ),
         ("", ""),
     )
+    active = [
+        (symbol, position.position_side, position.active_interval)
+        for symbol, position in state.positions.items()
+        if position.position_side
+    ]
     return MultiTimeframePaperSummary(
         status="FUSED" if state.permanent_fuse else "RUNNING",
         processed_bars=processed_bars,
         events=tuple(events),
         equity=state.equity,
-        position_side=state.position_side,
-        active_symbol=state.position_symbol,
-        active_interval=state.active_interval,
+        position_side=(active[0][1] if len(active) == 1 else "MULTIPLE" if active else ""),
+        active_symbol=",".join(item[0] for item in active),
+        active_interval=",".join(item[2] for item in active),
         selected_symbol=selected[0],
         selected_interval=selected[1],
-        reason="V5 BTC/ETH多周期共享单持仓影子模拟；Gate订单提交接口未调用",
+        reason="V5.2 BTC/ETH可同时持仓、各品种内部单持仓；Gate订单提交接口未调用",
     )
