@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     INTERVAL_PRIORITY,
@@ -25,13 +26,38 @@ LAST_OPEN = {
 
 
 def test_wide_rotation_reduces_two_points_before_middle() -> None:
-    assert _middle_reduction_trigger("LONG", 80.0, 100.0, 1.0) == (98.0, 2.0)
-    assert _middle_reduction_trigger("SHORT", 120.0, 100.0, 1.0) == (102.0, 2.0)
+    assert _middle_reduction_trigger("ETH_USDT", "LONG", 80.0, 100.0, 1.0) == (
+        98.0,
+        2.0,
+    )
+    assert _middle_reduction_trigger("ETH_USDT", "SHORT", 120.0, 100.0, 1.0) == (
+        102.0,
+        2.0,
+    )
 
 
 def test_narrow_rotation_waits_for_exact_middle() -> None:
-    assert _middle_reduction_trigger("LONG", 95.0, 100.0, 1.0) == (100.0, 0.0)
-    assert _middle_reduction_trigger("SHORT", 105.0, 100.0, 1.0) == (100.0, 0.0)
+    assert _middle_reduction_trigger("ETH_USDT", "LONG", 95.0, 100.0, 1.0) == (
+        100.0,
+        0.0,
+    )
+    assert _middle_reduction_trigger("ETH_USDT", "SHORT", 105.0, 100.0, 1.0) == (
+        100.0,
+        0.0,
+    )
+
+
+def test_non_eth_reduces_at_eighty_percent_for_projected_100_percent_profit() -> None:
+    long_trigger, long_advance = _middle_reduction_trigger("BTC_USDT", "LONG", 100.0, 101.0, 1.0)
+    short_trigger, short_advance = _middle_reduction_trigger("BTC_USDT", "SHORT", 100.0, 99.0, 1.0)
+    assert long_trigger == pytest.approx(100.8)
+    assert long_advance == pytest.approx(0.2)
+    assert short_trigger == pytest.approx(99.2)
+    assert short_advance == pytest.approx(0.2)
+
+
+def test_non_eth_waits_for_middle_below_projected_100_percent_profit() -> None:
+    assert _middle_reduction_trigger("BTC_USDT", "LONG", 100.0, 100.5, 1.0) == (100.5, 0.0)
 
 
 def _bars_by_interval() -> dict[str, pd.DataFrame]:

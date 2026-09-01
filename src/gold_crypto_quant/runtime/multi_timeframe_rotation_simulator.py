@@ -13,7 +13,7 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-MULTI_ROTATION_STRATEGY_VERSION = "5.2.0"
+MULTI_ROTATION_STRATEGY_VERSION = "5.3.0"
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 SYMBOL_PRIORITY = ("BTC_USDT", "ETH_USDT")
 INTERVAL_DURATION = {
@@ -25,6 +25,7 @@ INTERVAL_DURATION = {
 DEFAULT_MULTI_STATE_PATH = Path(".runtime/bollinger-multi-symbol-paper-v5.json")
 LEGACY_MULTI_STATE_PATH = Path(".runtime/bollinger-multi-timeframe-paper-v4.json")
 ETH_RULE_REFERENCE_PRICE = 2_500.0
+PAPER_LEVERAGE = 125.0
 
 
 @dataclass(slots=True)
@@ -145,15 +146,24 @@ def _parameters_for_symbol(
 
 
 def _middle_reduction_trigger(
+    symbol: str,
     side: str,
     entry_price: float,
     middle_price: float,
     point_scale: float,
 ) -> tuple[float, float]:
-    """返回中轨减仓触发价和提前点数；宽波段提前，窄波段保持原中轨。"""
+    """按ETH点数规则或其他币的杠杆收益规则返回减仓触发价。"""
     distance = abs(entry_price - middle_price)
-    advance = 2.0 * point_scale if distance >= 10.0 * point_scale else 0.0
-    trigger = middle_price - advance if side == "LONG" else middle_price + advance
+    if symbol == "ETH_USDT":
+        advance = 2.0 * point_scale if distance >= 10.0 * point_scale else 0.0
+        trigger = middle_price - advance if side == "LONG" else middle_price + advance
+        return trigger, advance
+    projected_leveraged_return = distance / entry_price * PAPER_LEVERAGE
+    if projected_leveraged_return + 1e-12 < 1.0:
+        return middle_price, 0.0
+    # 到中轨预计杠杆收益达到100%时，走完价格路径的80%提前减半仓。
+    trigger = entry_price + (middle_price - entry_price) * 0.8
+    advance = abs(middle_price - trigger)
     return trigger, advance
 
 
@@ -298,6 +308,7 @@ def run_multi_timeframe_paper_cycle(
         position.middle_reduced = False
         point_scale = parameters.fixed_stop_distance / 5.0
         middle_trigger, middle_advance = _middle_reduction_trigger(
+            symbol,
             side,
             reference,
             middle_reference,
@@ -306,11 +317,19 @@ def run_multi_timeframe_paper_cycle(
         position.middle_reference_price = middle_reference
         position.middle_trigger_price = middle_trigger
         position.middle_advance_distance = middle_advance
-        reduction_rule = (
-            f"距离中轨较远，提前{middle_advance:.2f}点"
-            if middle_advance > 0
-            else "距离中轨不足阈值，触碰中轨"
-        )
+        if symbol == "ETH_USDT":
+            reduction_rule = (
+                f"ETH距离中轨≥10点，提前{middle_advance:.2f}点"
+                if middle_advance > 0
+                else "ETH距离中轨<10点，触碰中轨"
+            )
+        else:
+            projected_return = abs(reference - middle_reference) / reference * PAPER_LEVERAGE
+            reduction_rule = (
+                f"预计到中轨杠杆收益{projected_return:.2%}，80%路径减仓"
+                if middle_advance > 0
+                else f"预计到中轨杠杆收益{projected_return:.2%}，不足100%等中轨"
+            )
         add_event(
             timestamp,
             f"模拟开仓：{'买入做多' if side == 'LONG' else '卖出做空'}",
