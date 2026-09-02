@@ -17,3 +17,4 @@ build/
 *.egg-info/
 claude-handoff/
 claude-handoff-*.zip
+var/backups/
