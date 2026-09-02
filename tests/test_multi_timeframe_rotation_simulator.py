@@ -11,6 +11,9 @@ from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     INTERVAL_PRIORITY,
     _bands_are_opening,
     _block_symbol_after_stop,
+    _has_bottom_structure,
+    _has_top_structure,
+    _ladder_step_points,
     _micro_zones_allow_entry,
     _middle_reduction_trigger,
     _new_state,
@@ -359,6 +362,28 @@ def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
     assert "品种：ETH_USDT" in event_lines
 
 
+def test_adding_a_new_symbol_to_an_existing_state_file_does_not_crash(tmp_path) -> None:
+    """老状态文件里没见过的新品种（比如后接入的XAU_USDT）必须原地补齐，不能KeyError，
+    也不能重置已有品种积累的权益和历史。"""
+    state_path = tmp_path / "add-new-symbol.json"
+    btc = _bars_by_interval()
+    run_multi_timeframe_paper_cycle({"BTC_USDT": btc}, state_path=state_path)
+    equity_before = json.loads(state_path.read_text(encoding="utf-8"))["equity"]
+
+    xau = _bars_by_interval()
+    summary = run_multi_timeframe_paper_cycle(
+        {"BTC_USDT": btc, "XAU_USDT": xau},
+        state_path=state_path,
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["equity"] == equity_before
+    assert "XAU_USDT" in payload["positions"]
+    assert "XAU_USDT" in payload["box_active"]
+    assert "XAU_USDT" in payload["last_bar_times"]
+    assert summary.status != "ERROR"
+
+
 def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
     tmp_path,
 ) -> None:
@@ -445,3 +470,88 @@ def test_target_does_not_reverse_when_current_bar_invalidates_box(tmp_path) -> N
     assert summary.position_side == ""
     assert any("到达对侧轨止盈" in event.title for event in summary.events)
     assert not any("模拟开仓" in event.title for event in summary.events)
+
+
+def _divergence_bars(prices: list[float]) -> pd.DataFrame:
+    """把一串收盘价补成MACD可用的K线，足够长以让EMA26收敛。"""
+    warmup = [prices[0]] * 60
+    closes = warmup + prices
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [value + 0.5 for value in closes],
+            "low": [value - 0.5 for value in closes],
+            "close": closes,
+            "volume": [10.0] * len(closes),
+        },
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="5min", tz="UTC"),
+    )
+
+
+def _rally(start: float, end: float, steps: int) -> list[float]:
+    span = (end - start) / (steps - 1)
+    return [start + span * i for i in range(steps)]
+
+
+def test_top_structure_detects_macd_bearish_divergence() -> None:
+    """价格创新高但DIF更低＝顶背离；第二个高点靠更慢的爬升制造动能衰减。"""
+    prices = (
+        _rally(100.0, 118.0, 10)  # 第一波急涨，DIF冲高
+        + _rally(118.0, 104.0, 8)  # 回调
+        + _rally(104.0, 120.0, 22)  # 第二波缓慢爬升到更高价，但动能更弱
+        + [118.0, 117.0]  # 右侧确认摆动点
+    )
+
+    assert _has_top_structure(_divergence_bars(prices)) is True
+
+
+def test_top_structure_rejects_healthy_uptrend() -> None:
+    """价格创新高且动能同步走强时不是顶背离。"""
+    prices = (
+        _rally(100.0, 110.0, 10)
+        + _rally(110.0, 106.0, 5)
+        + _rally(106.0, 140.0, 20)
+        + [138.0, 137.0]
+    )
+
+    assert _has_top_structure(_divergence_bars(prices)) is False
+
+
+def test_bottom_structure_detects_macd_bullish_divergence() -> None:
+    """价格创新低但DIF更高＝底背离。"""
+    prices = (
+        _rally(120.0, 102.0, 10)
+        + _rally(102.0, 116.0, 8)
+        + _rally(116.0, 100.0, 22)
+        + [102.0, 103.0]
+    )
+
+    assert _has_bottom_structure(_divergence_bars(prices)) is True
+
+
+def test_structure_needs_enough_history_for_macd() -> None:
+    """历史不足以让EMA26收敛时保持保守，不给出结构信号。"""
+    short = pd.DataFrame(
+        {
+            "open": [100.0] * 10,
+            "high": [101.0] * 10,
+            "low": [99.0] * 10,
+            "close": [100.0] * 10,
+            "volume": [10.0] * 10,
+        },
+        index=pd.date_range("2026-01-01", periods=10, freq="5min", tz="UTC"),
+    )
+
+    assert _has_top_structure(short) is False
+    assert _has_bottom_structure(short) is False
+
+
+def test_ladder_step_scales_with_symbol_price() -> None:
+    """8点是按ETH价位定的，BTC等高价品种必须等比放大，否则只相当于噪音。"""
+    eth_step = _ladder_step_points(pd.DataFrame({"close": [2420.0] * 20}))
+    btc_step = _ladder_step_points(pd.DataFrame({"close": [77400.0] * 20}))
+
+    assert eth_step == pytest.approx(8.0)
+    # 缩放后各品种步长占价格比例应当一致，都在0.32%附近。
+    assert btc_step / 77400.0 == pytest.approx(eth_step / 2500.0, rel=1e-6)
+    assert btc_step > 200.0

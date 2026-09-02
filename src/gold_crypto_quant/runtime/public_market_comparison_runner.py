@@ -22,7 +22,7 @@ from gold_crypto_quant.runtime.bollinger_signal_cycle import (
 from gold_crypto_quant.storage.market_health import refresh_market_health
 from gold_crypto_quant.storage.shadow_monitor import record_shadow_cycle
 
-PUBLIC_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT")
+PUBLIC_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 PUBLIC_COMPARISON_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 GATE_LIVE_STATE_PATH = Path(".runtime/bollinger-gate-live-paper-v5.json")
 BINANCE_LIVE_STATE_PATH = Path(".runtime/bollinger-binance-live-paper-v5.json")
@@ -204,6 +204,7 @@ class PublicMarketComparisonRunner:
                     )
                     self._refresh_health(GATE_LIVE_VENUE)
                     gate_summary = run_bollinger_signal_cycle(
+                        symbols=PUBLIC_COMPARISON_CONTRACTS,
                         venue=GATE_LIVE_VENUE,
                         state_path=GATE_LIVE_STATE_PATH,
                     )
@@ -229,6 +230,7 @@ class PublicMarketComparisonRunner:
                     )
                     self._refresh_health(BINANCE_LIVE_VENUE)
                     binance_summary = run_bollinger_signal_cycle(
+                        symbols=PUBLIC_COMPARISON_CONTRACTS,
                         venue=BINANCE_LIVE_VENUE,
                         state_path=BINANCE_LIVE_STATE_PATH,
                     )

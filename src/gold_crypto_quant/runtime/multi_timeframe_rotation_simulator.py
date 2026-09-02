@@ -49,12 +49,19 @@ class SymbolPaperPositionState:
     middle_reduced: bool = False
     middle_reference_price: float = 0.0
     middle_trigger_price: float = 0.0
+    # 开仓时命中反方向顶/底结构：多单查底部结构、空单查顶部结构，命中后到对侧轨不再止盈反手。
+    structure_confirmed: bool = False
+    # 到达对侧轨后若structure_confirmed为真，进入阶梯延续：每8点减仓一次，止损跟踪到上一触发价。
+    trend_ride_active: bool = False
+    trend_ride_next_trigger_price: float = 0.0
+    # 该笔交易实际使用的阶梯步长；ETH为8点，BTC等高价品种按价格比例放大。
+    trend_ride_step_points: float = 0.0
     middle_advance_distance: float = 0.0
 
 
 @dataclass(slots=True)
 class MultiTimeframePaperState:
-    """BTC/ETH共享资金，但每个品种各自最多持有一笔仓位。"""
+    """各品种共享资金，但每个品种各自最多持有一笔仓位。"""
 
     strategy_version: str = MULTI_ROTATION_STRATEGY_VERSION
     equity: float = 10_000.0
@@ -244,6 +251,109 @@ def _bands_are_opening(context: pd.DataFrame, position: int) -> bool:
         float(current["bb_upper"]) > float(previous["bb_upper"])
         and float(current["bb_lower"]) < float(previous["bb_lower"])
         and float(current["bb_width"]) > float(previous["bb_width"])
+    )
+
+
+# 顶/底结构按MACD背离判定：价格创新高但DIF更低为顶背离，价格创新低但DIF更高为底背离。
+STRUCTURE_MACD_FAST = 12
+STRUCTURE_MACD_SLOW = 26
+# 计算MACD需要足够长的历史，取150根让EMA26充分收敛。
+STRUCTURE_MACD_HISTORY = 150
+# 在最近40根已收盘K线里寻找两个摆动高/低点做背离比较。
+STRUCTURE_SWING_WINDOW = 40
+# 摆动点需左右各2根确认；右侧确认意味着最近2根不参与判定，这是必要的延迟而非未来数据。
+STRUCTURE_SWING_CONFIRM = 2
+STRUCTURE_LADDER_STEP_POINTS = 8.0
+
+
+def _ladder_step_points(bars: pd.DataFrame) -> float:
+    """阶梯止盈步长：ETH量级用8点原值，BTC等高价品种按价格中位数等比例放大。
+
+    8点是按ETH价位定的绝对点数，直接套到BTC（约0.01%）只相当于噪音，
+    因此复用与走平阈值相同的价格比例换算。
+    """
+    price_scale = max(
+        1.0,
+        float(pd.to_numeric(bars["close"].tail(20), errors="raise").median())
+        / ETH_RULE_REFERENCE_PRICE,
+    )
+    return STRUCTURE_LADDER_STEP_POINTS * price_scale
+
+
+def _closed_bars_before(
+    bars: pd.DataFrame,
+    duration: pd.Timedelta,
+    as_of: pd.Timestamp,
+    lookback: int,
+) -> pd.DataFrame:
+    """返回as_of之前已完整收盘的最近lookback根K线，避免读取未来数据。"""
+    available = bars.index + duration <= as_of
+    return bars.loc[available].tail(lookback)
+
+
+def _macd_dif(bars: pd.DataFrame) -> pd.Series:
+    """按标准MACD(12,26)计算DIF快线，用于顶底背离判定。"""
+    close = pd.to_numeric(bars["close"], errors="raise").astype(float)
+    fast = close.ewm(span=STRUCTURE_MACD_FAST, adjust=False).mean()
+    slow = close.ewm(span=STRUCTURE_MACD_SLOW, adjust=False).mean()
+    return fast - slow
+
+
+def _swing_positions(values, *, high: bool) -> list[int]:
+    """返回左右各STRUCTURE_SWING_CONFIRM根都不更极端的摆动点下标。"""
+    confirm = STRUCTURE_SWING_CONFIRM
+    found: list[int] = []
+    for index in range(confirm, len(values) - confirm):
+        window = values[index - confirm : index + confirm + 1]
+        pivot = values[index]
+        if high and pivot >= window.max() and pivot > window[0]:
+            found.append(index)
+        elif not high and pivot <= window.min() and pivot < window[0]:
+            found.append(index)
+    return found
+
+
+def _has_top_structure(bars: pd.DataFrame) -> bool:
+    """顶部结构＝MACD顶背离：后一个摆动高点收盘价更高，但对应DIF更低。
+
+    ``bars`` 需要传入截止判定时刻的完整已收盘序列，函数内部自行计算MACD并回看，
+    因为DIF依赖长历史，先截短再算会得到失真的快线。
+    """
+    if len(bars) < STRUCTURE_MACD_SLOW + STRUCTURE_SWING_CONFIRM * 2:
+        return False
+    dif = _macd_dif(bars.tail(STRUCTURE_MACD_HISTORY))
+    close = pd.to_numeric(bars["close"], errors="raise").astype(float).tail(len(dif))
+    closes = close.tail(STRUCTURE_SWING_WINDOW).to_numpy()
+    difs = dif.tail(STRUCTURE_SWING_WINDOW).to_numpy()
+    pivots = _swing_positions(closes, high=True)
+    if len(pivots) < 2:
+        return False
+    # 以窗口内价格最高的摆动点作为“新高”，再往前找一个价更低但动能更强的高点。
+    peak = max(pivots, key=lambda index: closes[index])
+    return any(
+        closes[index] < closes[peak] and difs[index] > difs[peak]
+        for index in pivots
+        if index < peak
+    )
+
+
+def _has_bottom_structure(bars: pd.DataFrame) -> bool:
+    """底部结构＝MACD底背离：后一个摆动低点收盘价更低，但对应DIF更高。"""
+    if len(bars) < STRUCTURE_MACD_SLOW + STRUCTURE_SWING_CONFIRM * 2:
+        return False
+    dif = _macd_dif(bars.tail(STRUCTURE_MACD_HISTORY))
+    close = pd.to_numeric(bars["close"], errors="raise").astype(float).tail(len(dif))
+    closes = close.tail(STRUCTURE_SWING_WINDOW).to_numpy()
+    difs = dif.tail(STRUCTURE_SWING_WINDOW).to_numpy()
+    pivots = _swing_positions(closes, high=False)
+    if len(pivots) < 2:
+        return False
+    # 以窗口内价格最低的摆动点作为“新低”，再往前找一个价更高但动能更弱的低点。
+    trough = min(pivots, key=lambda index: closes[index])
+    return any(
+        closes[index] > closes[trough] and difs[index] < difs[trough]
+        for index in pivots
+        if index < trough
     )
 
 
@@ -489,6 +599,7 @@ def run_multi_timeframe_paper_cycle(
         for symbol, symbol_bars in bars_by_symbol.items()
     }
     micro_contexts: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    micro_three_minute_bars: dict[str, pd.DataFrame] = {}
     if micro_bars_by_symbol is not None:
         missing_micro = set(symbols).difference(micro_bars_by_symbol)
         if missing_micro:
@@ -498,6 +609,7 @@ def run_multi_timeframe_paper_cycle(
             if len(bars_1m) < 65:
                 raise ValueError(f"{symbol} requires at least 65 one-minute bars")
             bars_3m = _resample_three_minute_bars(bars_1m)
+            micro_three_minute_bars[symbol] = bars_3m
             micro_contexts[symbol] = (
                 bars_1m,
                 _micro_bollinger_context(bars_1m),
@@ -545,8 +657,25 @@ def run_multi_timeframe_paper_cycle(
             active_interval="",
             selected_symbol="",
             selected_interval="",
-            reason="V5 BTC/ETH共享影子账户已从各周期最新收盘K线开始",
+            reason="V5共享影子账户已从各品种各周期最新收盘K线开始",
         )
+
+    # 老状态文件里没见过的新品种（例如新接入的XAU_USDT）在此原地补齐游标和仓位槽位，
+    # 从当前最新已收盘K线开始观察，不回放该品种接入前的历史箱体或触轨。
+    for symbol in symbols:
+        if symbol in state.positions:
+            continue
+        state.positions[symbol] = SymbolPaperPositionState()
+        state.symbol_blocked_after_stop[symbol] = False
+        state.symbol_stopped_interval[symbol] = ""
+        state.symbol_resume_check_after[symbol] = ""
+        state.box_active[symbol] = {interval: False for interval in INTERVAL_PRIORITY}
+        state.blocked_after_stop[symbol] = {interval: False for interval in INTERVAL_PRIORITY}
+        state.reset_streak[symbol] = {interval: 0 for interval in INTERVAL_PRIORITY}
+        state.last_bar_times[symbol] = {
+            interval: bars.index[-1].isoformat()
+            for interval, bars in bars_by_symbol[symbol].items()
+        }
 
     # V5.6原地升级到V5.7时仅建立逐分钟游标，保留当前仓位和全部权益。
     # 本轮不追溯执行升级前已经结束的1分钟触轨，下一轮开始即时观察。
@@ -639,6 +768,10 @@ def run_multi_timeframe_paper_cycle(
         state.equity -= position.entry_fee_remaining
         position.trade_net_pnl = 0.0
         position.middle_reduced = False
+        position.structure_confirmed = has_reversal_structure(symbol, interval, side, timestamp)
+        position.trend_ride_active = False
+        position.trend_ride_next_trigger_price = 0.0
+        position.trend_ride_step_points = 0.0
         # ETH的“10点距离、提前2点”是固定价格点数，不能随各周期止损距离放大。
         point_scale = 1.0
         middle_trigger, middle_advance = _middle_reduction_trigger(
@@ -675,6 +808,14 @@ def run_multi_timeframe_paper_cycle(
             f"保护止损：{position.stop_price:.2f}",
             f"中轨参考价：{middle_reference:.2f}",
             f"减仓触发价：{middle_trigger:.2f}（{reduction_rule}）",
+            (
+                f"{'底部' if side == 'LONG' else '顶部'}结构："
+                + (
+                    "已确认，对侧轨不止盈反手，改为阶梯延续"
+                    if position.structure_confirmed
+                    else "未确认"
+                )
+            ),
             f"影子权益：{state.equity:.2f} USDT",
         )
 
@@ -739,6 +880,38 @@ def run_multi_timeframe_paper_cycle(
             return None
         return context.loc[available].iloc[-1]
 
+    def has_reversal_structure(
+        symbol: str,
+        interval: str,
+        new_side: str,
+        as_of: pd.Timestamp,
+    ) -> bool:
+        """反手方向若命中对应结构则保留原方向：多单查底部结构、空单查顶部结构；
+        当前主周期或1分钟、3分钟任一确认即成立。"""
+        checker = _has_bottom_structure if new_side == "LONG" else _has_top_structure
+        # MACD依赖长历史，这里传入截止判定时刻的完整已收盘序列，由判定函数内部回看。
+        main_bars = _closed_bars_before(
+            bars_by_symbol[symbol][interval],
+            INTERVAL_DURATION[interval],
+            as_of,
+            STRUCTURE_MACD_HISTORY,
+        )
+        if checker(main_bars):
+            return True
+        if symbol not in micro_contexts:
+            return False
+        bars_1m = micro_contexts[symbol][0]
+        if checker(
+            _closed_bars_before(bars_1m, pd.Timedelta(minutes=1), as_of, STRUCTURE_MACD_HISTORY)
+        ):
+            return True
+        bars_3m = micro_three_minute_bars.get(symbol)
+        if bars_3m is not None and checker(
+            _closed_bars_before(bars_3m, pd.Timedelta(minutes=3), as_of, STRUCTURE_MACD_HISTORY)
+        ):
+            return True
+        return False
+
     def stop_interval_open_time(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
         """把逐分钟止损时间归属到对应主周期K线，供完整收线等待规则使用。"""
         frequency = {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h"}[interval]
@@ -786,7 +959,9 @@ def run_multi_timeframe_paper_cycle(
                     if stop_hit:
                         reason = (
                             "中轨减仓后的保本止损"
-                            if position.middle_reduced
+                            if position.middle_reduced and not position.trend_ride_active
+                            else "阶梯延续止损"
+                            if position.trend_ride_active
                             else "固定保护止损"
                         )
                         close_quantity(
@@ -806,41 +981,93 @@ def run_multi_timeframe_paper_cycle(
                             stop_interval_open_time(minute_open_time, interval),
                         )
                         traded_this_minute = True
+                    elif position.trend_ride_active:
+                        # 结构延续阶段：只看下一个阶梯触发价，不再判断对侧轨或中轨。
+                        trigger = position.trend_ride_next_trigger_price
+                        # 旧状态文件没有步长字段时回算一次，避免步长为0导致阶梯原地踏步。
+                        step = position.trend_ride_step_points or _ladder_step_points(
+                            bars_by_symbol[symbol][interval]
+                        )
+                        ladder_hit = (
+                            position.position_side == "LONG"
+                            and float(minute_bar["high"]) >= trigger
+                        ) or (
+                            position.position_side == "SHORT"
+                            and float(minute_bar["low"]) <= trigger
+                        )
+                        if ladder_hit:
+                            close_quantity(
+                                symbol,
+                                position.remaining_quantity * 0.5,
+                                trigger,
+                                minute_open_time,
+                                f"结构延续：每{step:.2f}点阶梯减仓50%",
+                                market=False,
+                            )
+                            going_long = position.position_side == "LONG"
+                            # 止损滞后一档，落在上一个减仓价上，与当前价保持一个步长的缓冲。
+                            position.stop_price = (
+                                trigger - step if going_long else trigger + step
+                            )
+                            position.trend_ride_next_trigger_price = (
+                                trigger + step if going_long else trigger - step
+                            )
+                            traded_this_minute = True
                     elif target_hit:
                         old_side = position.position_side
                         target = upper if old_side == "LONG" else lower
-                        close_quantity(
-                            symbol,
-                            position.remaining_quantity,
-                            target,
-                            minute_open_time,
-                            "到达对侧轨止盈",
-                            market=False,
-                        )
-                        position.position_side = ""
-                        position.active_interval = ""
-                        traded_this_minute = True
-                        # 箱体仍有效时，触及对侧轨即可原价反手；不等待主周期收线。
-                        box_valid = (
-                            bool(main["box_candidate"])
-                            and not bool(main["breakout"])
-                            and state.box_active[symbol][interval]
-                            and not state.blocked_after_stop[symbol][interval]
-                            and interval in ENTRY_INTERVAL_PRIORITY
-                            and not state.daily_blocked
-                            and not state.permanent_fuse
-                        )
-                        if box_valid:
-                            new_side = "SHORT" if old_side == "LONG" else "LONG"
-                            open_position(
-                                new_side,
+                        if position.structure_confirmed:
+                            # 对侧轨命中反方向结构：不止盈反手，改为减仓50%、止损收紧到中轨，
+                            # 只往结构确认的方向继续看，进入阶梯延续。
+                            step = _ladder_step_points(bars_by_symbol[symbol][interval])
+                            close_quantity(
                                 symbol,
-                                interval,
+                                position.remaining_quantity * 0.5,
                                 target,
-                                float(main["bb_middle"]),
                                 minute_open_time,
-                                "对侧轨止盈后触轨即时反手",
+                                f"对侧轨结构确认：减仓50%延续原方向，不反手（步长{step:.2f}点）",
+                                market=False,
                             )
+                            position.stop_price = float(main["bb_middle"])
+                            position.trend_ride_active = True
+                            position.trend_ride_step_points = step
+                            position.trend_ride_next_trigger_price = (
+                                target - step if old_side == "SHORT" else target + step
+                            )
+                            traded_this_minute = True
+                        else:
+                            close_quantity(
+                                symbol,
+                                position.remaining_quantity,
+                                target,
+                                minute_open_time,
+                                "到达对侧轨止盈",
+                                market=False,
+                            )
+                            position.position_side = ""
+                            position.active_interval = ""
+                            traded_this_minute = True
+                            # 箱体仍有效时，触及对侧轨即可原价反手；不等待主周期收线。
+                            box_valid = (
+                                bool(main["box_candidate"])
+                                and not bool(main["breakout"])
+                                and state.box_active[symbol][interval]
+                                and not state.blocked_after_stop[symbol][interval]
+                                and interval in ENTRY_INTERVAL_PRIORITY
+                                and not state.daily_blocked
+                                and not state.permanent_fuse
+                            )
+                            if box_valid:
+                                new_side = "SHORT" if old_side == "LONG" else "LONG"
+                                open_position(
+                                    new_side,
+                                    symbol,
+                                    interval,
+                                    target,
+                                    float(main["bb_middle"]),
+                                    minute_open_time,
+                                    "对侧轨止盈后触轨即时反手",
+                                )
                     else:
                         middle_trigger = position.middle_trigger_price or float(main["bb_middle"])
                         middle_hit = (
@@ -987,7 +1214,7 @@ def run_multi_timeframe_paper_cycle(
             )
         }
 
-        # BTC和ETH各自管理唯一仓位；一个品种的动作不阻止另一个品种独立交易。
+        # 每个品种各自管理唯一仓位；一个品种的动作不阻止另一个品种独立交易。
         for symbol in symbols:
             # 正式运行传入1分钟行情时，V5.7已经在上面的逐分钟循环完成全部仓位动作。
             # 主周期代码仅保留给不传1分钟数据的历史单元测试和兼容调用。

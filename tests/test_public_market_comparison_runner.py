@@ -2,9 +2,15 @@
 
 from gold_crypto_quant.runtime.bollinger_signal_cycle import BollingerSignalCycleSummary
 from gold_crypto_quant.runtime.public_market_comparison_runner import (
+    PUBLIC_COMPARISON_CONTRACTS,
     ComparisonFeedResult,
     PublicMarketComparisonRunner,
 )
+
+
+def test_public_comparison_contracts_include_gold() -> None:
+    """双所对照必须同时覆盖BTC、ETH、XAU，避免后续误删黄金品种。"""
+    assert PUBLIC_COMPARISON_CONTRACTS == ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 
 
 def test_comparison_email_summary_shows_both_equities_and_difference() -> None:

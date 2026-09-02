@@ -13,7 +13,7 @@ from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument
 
 BINANCE_LIVE_VENUE = "BINANCE_LIVE_PUBLIC"
-INTERNAL_TO_BINANCE = {"BTC_USDT": "BTCUSDT", "ETH_USDT": "ETHUSDT"}
+INTERNAL_TO_BINANCE = {"BTC_USDT": "BTCUSDT", "ETH_USDT": "ETHUSDT", "XAU_USDT": "XAUUSDT"}
 
 
 @dataclass(frozen=True, slots=True)

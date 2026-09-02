@@ -9,6 +9,8 @@ import pandas as pd
 
 SUPPORTED_INTERVALS = frozenset({"1m", "5m", "15m", "30m", "1h"})
 BINANCE_FUTURES_HOST = "fapi.binance.com"
+# PERPETUAL：常规加密货币永续合约；TRADIFI_PERPETUAL：2026年上线的受监管黄金/白银永续合约。
+TRADABLE_CONTRACT_TYPES = frozenset({"PERPETUAL", "TRADIFI_PERPETUAL"})
 
 
 class BinanceApiError(RuntimeError):
@@ -58,7 +60,8 @@ class BinancePublicClient:
         match = next((item for item in data["symbols"] if item.get("symbol") == symbol), None)
         if match is None:
             raise BinanceApiError(f"Binance futures symbol not found: {symbol}")
-        if match.get("contractType") != "PERPETUAL" or match.get("status") != "TRADING":
+        is_tradable = match.get("contractType") in TRADABLE_CONTRACT_TYPES
+        if not is_tradable or match.get("status") != "TRADING":
             raise BinanceApiError(f"Binance futures symbol is not tradable perpetual: {symbol}")
         self._symbol_cache[symbol] = match
         return match

@@ -57,3 +57,26 @@ def test_exchange_symbol_validation_is_cached() -> None:
         client.get_exchange_symbol("ETHUSDT")
 
     assert request_count == 1
+
+
+def test_exchange_symbol_accepts_tradifi_perpetual_gold_contract() -> None:
+    """XAUUSDT等2026年新增的受监管黄金/白银合约标记为TRADIFI_PERPETUAL，同样应放行。"""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "symbols": [
+                    {
+                        "symbol": "XAUUSDT",
+                        "contractType": "TRADIFI_PERPETUAL",
+                        "status": "TRADING",
+                    }
+                ]
+            },
+        )
+
+    with BinancePublicClient(transport=httpx.MockTransport(handler)) as client:
+        match = client.get_exchange_symbol("XAUUSDT")
+
+    assert match["symbol"] == "XAUUSDT"
