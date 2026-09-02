@@ -217,6 +217,22 @@ Tailscale等安全内网并显式设置 `WEB_HOST`，不要把该端口直接暴
 `shadow_trade_events`。当前系统实验账户不属于 `admin`；以后增加普通用户和正式交易账户时，
 通过 `trading_accounts.owner_user_id`、交易场所和 `SHADOW/DEMO/LIVE` 环境继续隔离。
 
+## 多用户数据隔离
+
+监管页面的数据按访问者过滤，而不是一律返回全量：
+
+- **超级管理员**看全部账户，包括系统影子账户
+- **普通用户**只看 `trading_accounts.owner_user_id` 等于自己的账户；`owner_type=SYSTEM`
+  的系统影子账户对其一律不可见
+- 角色缺失、大小写不符或近似取值都按最小权限处理，不会被当成超管
+
+`build_overview` 与 `build_trade_events` 的 `viewer` 是**没有默认值的关键字参数**——将来新增
+接口若忘记传，会直接报错而不是静默返回所有人的数据。可见性判定 `account_is_visible` 是不触库
+的纯函数，与查询分离，因此能独立测试。
+
+接入第三方登录（OAuth2）前必须先完成这一层：隔离缺位时，任何能注册登录的人都能看到全部
+持仓、权益曲线和交易明细。
+
 ## 旧EMA研究（已废弃，不参与运行）
 
 `backtest-ema` 会从 MySQL 读取 BTC、ETH 的四个周期，使用下一根K线开盘价执行信号，
