@@ -249,8 +249,8 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         )
 
     @app.get("/api/overview")
-    def overview_api(request: Request, _user=Depends(current_admin)):
-        return build_overview(request.app.state.engine)
+    def overview_api(request: Request, user=Depends(current_admin)):
+        return build_overview(request.app.state.engine, viewer=user)
 
     @app.get("/api/market")
     def market_api(
@@ -277,10 +277,11 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         symbol: str | None = None,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=1, le=200),
-        _user=Depends(current_admin),
+        user=Depends(current_admin),
     ):
         return build_trade_events(
             request.app.state.engine,
+            viewer=user,
             venue=venue,
             symbol=symbol,
             page=page,

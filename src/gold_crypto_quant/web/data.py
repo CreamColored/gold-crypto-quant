@@ -118,16 +118,55 @@ def _feed_health(session: Session, venue: str) -> dict[str, Any]:
     }
 
 
-def build_overview(engine: Engine) -> dict[str, Any]:
-    """返回首页双账户、权益曲线、仓位和最近事件。"""
+def is_super_admin(viewer: Any) -> bool:
+    """只有明确标记为SUPER_ADMIN才算超管；角色缺失或异常一律按最小权限处理。"""
+    return getattr(viewer, "role", "") == "SUPER_ADMIN"
+
+
+def account_is_visible(account: Any, viewer: Any) -> bool:
+    """判定单个账户对访问者是否可见，是纯逻辑，不触库因此可独立测试。
+
+    超管看全部；普通用户只看归属自己的账户，系统影子账户对其一律不可见。
+    """
+    if is_super_admin(viewer):
+        return True
+    owner = getattr(account, "owner_user_id", None)
+    viewer_id = getattr(viewer, "id", None)
+    return (
+        getattr(account, "owner_type", "") != "SYSTEM"
+        and owner is not None
+        and owner == viewer_id
+    )
+
+
+def visible_accounts(session: Session, viewer: Any) -> list[TradingAccount]:
+    """返回该访问者可见的交易账户。
+
+    所有涉及账户的查询都必须先经过这里取得范围，不允许绕开直接查全表。
+    """
+    statement = select(TradingAccount).order_by(TradingAccount.id)
+    if not is_super_admin(viewer):
+        statement = statement.where(
+            TradingAccount.owner_user_id == getattr(viewer, "id", None),
+            TradingAccount.owner_type != "SYSTEM",
+        )
+    return list(session.scalars(statement).all())
+
+
+def build_overview(engine: Engine, *, viewer: Any) -> dict[str, Any]:
+    """返回首页账户、权益曲线、仓位和最近事件；只包含访问者可见的账户。
+
+    ``viewer`` 必须显式传入且没有默认值：漏传会直接报错，而不是静默返回全量数据。
+    """
     accounts: list[dict[str, Any]] = []
     equity_series: dict[str, list[dict[str, Any]]] = {}
     with Session(engine) as session:
-        account_models = session.scalars(
-            select(TradingAccount)
-            .where(TradingAccount.owner_type == "SYSTEM", TradingAccount.environment == "SHADOW")
-            .order_by(TradingAccount.id)
-        ).all()
+        account_models = [
+            account
+            for account in visible_accounts(session, viewer)
+            if account.environment == "SHADOW"
+        ]
+        visible_ids = [account.id for account in account_models]
         for account in account_models:
             info = VENUE_INFO.get(account.venue)
             if info is None:
@@ -180,12 +219,18 @@ def build_overview(engine: Engine) -> dict[str, Any]:
                     "trading_enabled": account.trading_enabled,
                 }
             )
-        event_rows = session.execute(
-            select(ShadowTradeEvent, TradingAccount.display_name, TradingAccount.venue)
-            .join(TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id)
-            .order_by(ShadowTradeEvent.event_time.desc(), ShadowTradeEvent.id.desc())
-            .limit(12)
-        ).all()
+        # 最近事件同样限定在可见账户内；无可见账户时直接返回空，不能落回全表。
+        event_rows = (
+            session.execute(
+                select(ShadowTradeEvent, TradingAccount.display_name, TradingAccount.venue)
+                .join(TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id)
+                .where(ShadowTradeEvent.trading_account_id.in_(visible_ids))
+                .order_by(ShadowTradeEvent.event_time.desc(), ShadowTradeEvent.id.desc())
+                .limit(12)
+            ).all()
+            if visible_ids
+            else []
+        )
     recent_events = [
         {
             "id": event.id,
@@ -275,17 +320,32 @@ def build_market_chart(
 def build_trade_events(
     engine: Engine,
     *,
+    viewer: Any,
     venue: str | None = None,
     symbol: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> dict[str, Any]:
-    """按交易所和品种分页返回影子交易事件，附带总数用于翻页。"""
+    """按交易所和品种分页返回影子交易事件；只包含访问者可见账户的事件。
+
+    ``viewer`` 无默认值，漏传会直接报错而不是泄露他人交易明细。
+    """
     page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     with Session(engine) as session:
-        base_statement = select(ShadowTradeEvent).join(
-            TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id
+        visible_ids = [account.id for account in visible_accounts(session, viewer)]
+        if not visible_ids:
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+            }
+        base_statement = (
+            select(ShadowTradeEvent)
+            .join(TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id)
+            .where(ShadowTradeEvent.trading_account_id.in_(visible_ids))
         )
         if venue:
             base_statement = base_statement.where(TradingAccount.venue == venue)
@@ -299,6 +359,7 @@ def build_trade_events(
         statement = (
             select(ShadowTradeEvent, TradingAccount.display_name, TradingAccount.venue)
             .join(TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id)
+            .where(ShadowTradeEvent.trading_account_id.in_(visible_ids))
             .order_by(ShadowTradeEvent.event_time.desc(), ShadowTradeEvent.id.desc())
             .limit(page_size)
             .offset((page - 1) * page_size)
