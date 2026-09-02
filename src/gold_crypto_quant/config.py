@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_from: str | None = None
 
+    # 钉钉自定义机器人：Webhook与加签密钥都留空时完全禁用，不影响邮件通道。
+    dingtalk_webhook: str | None = None
+    dingtalk_secret: SecretStr | None = None
+
     # Gate 测试网与实盘使用不同密钥，SecretStr 可防止日志意外打印完整密钥。
     gate_testnet_api_key: SecretStr | None = None
     gate_testnet_api_secret: SecretStr | None = None

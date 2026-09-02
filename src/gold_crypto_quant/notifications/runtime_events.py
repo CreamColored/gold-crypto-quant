@@ -6,6 +6,11 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import SQLAlchemyError
 
 from gold_crypto_quant.config import Settings
+from gold_crypto_quant.notifications.dingtalk_bot import (
+    DingtalkError,
+    DingtalkNotifier,
+    build_markdown,
+)
 from gold_crypto_quant.notifications.smtp_mail import (
     build_gate_event_email,
     send_smtp_email,
@@ -26,6 +31,38 @@ class RuntimeEventNotifier:
         self._sent_keys: set[str] = set()
         # 服务重启时从当前最大成交开始，只通知本次运行后产生的新成交。
         self._last_trade_id = latest_paper_trade_id() if self.enabled else 0
+        # 钉钉是独立通道：未配置时静默跳过，配置了也不能让它的故障影响邮件与策略。
+        self.dingtalk = DingtalkNotifier(
+            settings.dingtalk_webhook,
+            (
+                settings.dingtalk_secret.get_secret_value()
+                if settings.dingtalk_secret is not None
+                else None
+            ),
+        )
+
+    def _push_dingtalk(
+        self,
+        *,
+        event_title: str,
+        event_lines: tuple[str, ...],
+        severity: str,
+        status_lines: tuple[str, ...] | None,
+    ) -> None:
+        """推送到钉钉；任何失败都吞掉，告警通道不得反过来影响交易主流程。"""
+        if not self.dingtalk.enabled:
+            return
+        try:
+            self.dingtalk.send(
+                build_markdown(
+                    event_title=event_title,
+                    event_lines=event_lines,
+                    severity=severity,
+                    status_lines=status_lines,
+                )
+            )
+        except (DingtalkError, OSError, ValueError):
+            pass
 
     def send(
         self,
@@ -39,12 +76,24 @@ class RuntimeEventNotifier:
         venue: str | None = None,
         comparison_status_lines: tuple[str, ...] | None = None,
     ) -> bool:
-        """发送并审计一封事件邮件；相同非重复事件在本进程中只发送一次。"""
-        if not self.enabled:
-            return False
+        """发送并审计一封事件邮件；相同非重复事件在本进程中只发送一次。
+
+        钉钉与邮件是两条独立通道：邮件未配置时钉钉照常推送，反之亦然。
+        """
         if not repeatable and event_key in self._sent_keys:
             return False
         now = now or datetime.now(UTC)
+        self._push_dingtalk(
+            event_title=event_title,
+            event_lines=event_lines,
+            severity=severity,
+            status_lines=comparison_status_lines,
+        )
+        if not self.enabled:
+            # 邮件未启用时也要记账，否则同一事件每轮都会重复推送钉钉。
+            if not repeatable:
+                self._sent_keys.add(event_key)
+            return False
         message = build_gate_event_email(
             now,
             event_title=event_title,
