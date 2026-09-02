@@ -15,3 +15,5 @@ data/
 dist/
 build/
 *.egg-info/
+claude-handoff/
+claude-handoff-*.zip

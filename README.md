@@ -1,24 +1,31 @@
-# Gold Crypto Quant
+# Gold Crypto Quant（Moon监管中心）
 
-加密货币合约的量化研究及模拟交易系统。当前阶段只运行Gate测试网行情，
-黄金/OANDA代码和历史数据保留但默认暂停；所有交易仍只允许测试环境，
-`LIVE_TRADING` 必须保持为 `false`。
+BTC/USDT与ETH/USDT的量化研究和影子模拟交易系统。当前阶段用Gate与币安各自的
+实盘公共行情（无需API密钥）并行运行同一套策略，对比两家交易所的信号、交易、
+盈亏和账户权益，但不提交任何真实订单。黄金/OANDA代码与历史数据保留，当前暂停
+（`OANDA_ENABLED=false`）。`LIVE_TRADING` 必须永久保持为 `false`。
 
-技术栈：Python 3.12、Pandas、vectorbt、MySQL 8、SQLAlchemy 和 PyMySQL。
+技术栈：Python 3.12、Pandas、vectorbt、MySQL 8、SQLAlchemy、PyMySQL、
+FastAPI、Jinja2、ECharts。
 
-## 第一阶段规则
+## 当前运行规则
 
-- 当前策略品种：ETH/USDT；BTC只保留行情，不使用ETH的固定点数参数开仓
-- 策略周期：15m判断并在15m开单；5m判断并在5m开单，两个周期独立
-- 策略：多周期布林带箱体轨道轮转 `BOLLINGER_RANGE 4.0.0`
+- 当前策略：布林带震荡箱体轨道轮转 `MULTI_ROTATION_STRATEGY_VERSION = 5.7.0`
+  （权威实现见 `src/gold_crypto_quant/runtime/multi_timeframe_rotation_simulator.py`
+  与 `src/gold_crypto_quant/strategy/bollinger_range.py`）
+- 策略品种：BTC/USDT、ETH/USDT，可同时持仓；每个币种在每个交易所各自最多一笔仓位
+- 策略周期：每个币种独立按 `5m → 15m → 30m → 1h` 固定优先级选取当前有效箱体
 - 方向：多空双向
-- 加密货币：官方合约测试网
+- 加密货币行情：Gate、币安各自的实盘公共行情，均无需API密钥，不提交真实订单
 - 黄金：暂缓，`OANDA_ENABLED=false`
-- 杠杆上限：125 倍；禁止补仓
-- 单笔账户风险：0.25%
-- 每日亏损熔断：2%
-- 最大回撤熔断：8%
-- 稳定模拟运行至少 30 天后才评估下一阶段
+- 杠杆上限：125 倍；禁止补仓、摊平、多空双开
+- 单笔账户风险：当前影子权益的0.25%
+- 每日亏损熔断：北京时间当日起始权益的2%
+- 最大回撤熔断：历史峰值的8%（永久熔断，需人工审核）
+- Gate与币安账户完全隔离，各自初始影子权益10,000 USDT，先观察7天
+
+完整策略细则、系统架构和运行检查步骤见 `claude-handoff/`（本地交接文档，
+已在 `.gitignore` 中排除，不提交到仓库）。
 
 ## 本地启动
 
@@ -32,6 +39,16 @@ python main.py
 python main.py db-check
 python main.py init-db
 python main.py sync-comments
+
+# 当前日常运行路径（V5.7，Gate+币安双所影子交易与Web监管）
+python main.py public-market-comparison          # 启动双行情影子服务，默认7天
+python main.py web-init-admin                    # 首次创建Moon超级管理员
+python main.py web-run                           # 启动Moon只读Web，默认127.0.0.1:8765
+python main.py system-readiness
+pytest
+ruff check .
+
+# 以下为单交易所（仅Gate）研究与历史命令，非当前日常运行路径
 python main.py import-gate-bars --limit 1000
 python main.py import-gate-bars --history-days 90 --limit 2000
 python main.py backtest-bollinger --contracts ETH_USDT
@@ -94,21 +111,21 @@ OANDA黄金模块当前由 `OANDA_ENABLED=false` 暂停，不参与系统就绪�
 策略只使用已经收盘的同周期K线计算下一根可用轨道，避免未来数据。
 125 倍仅为保证金杠杆上限，仓位由账户风险和止损距离决定。
 
-## 当前布林带策略
+## 当前布林带策略（V5.7）
 
-当前唯一活动策略是 `BOLLINGER_RANGE 4.0.0`。它按 `5m → 15m → 30m → 1h` 固定优先级
-寻找ETH箱体，每个周期都使用本周期布林带判断和成交。5m三轨漂移阈值为1 USDT，15m为2.5
-USDT，30m与1h均为3 USDT。高优先级存在有效箱体时不会同时交易低优先级。四周期共享一个
-影子账户，全局最多一个多单或一个空单，禁止多空双开。中轨减仓50%，对侧轨止盈并允许同
-周期反手，固定止损5 USDT。所有成交只存在本地影子账户，Gate订单接口始终不会被调用。
+当前唯一活动策略是 `MULTI_ROTATION_STRATEGY_VERSION = 5.7.0`。每个交易所独立对BTC和
+ETH按 `5m → 15m → 30m → 1h` 寻找三轨走平的布林带箱体；下轨做多、上轨做空，中轨附近
+减半并把剩余止损移到开仓价，对侧轨止盈，箱体仍有效时立即反手；止损后等待对应周期
+完整收线并重新确认震荡才解除封锁。BTC按最近20根收盘价中位数相对2,500的比例等比例
+放大走平阈值和最小带宽，ETH使用绝对点数。固定止损：BTC 5m/15m 250点、30m/1h 500点；
+ETH 5m/15m 5点、30m/1h 10点。BTC与ETH可以同时持仓，但同一币种同一交易所内只能有
+一笔仓位，禁止补仓、摊平和多空双开。
 
-当前规则见 [ETH多周期布林带轨道轮转策略](docs/当前ETH多周期布林带轨道轮转策略.md)。`backtest-bollinger` 使用
-因果事件顺序处理止损和分批止盈，并计入0.05%单边手续费与0.02%单边不利滑点。
-`qualify-bollinger` 固定参数执行三折验证，要求复合收益为正、至少2/3窗口盈利、每折至少
-8笔交易、最差回撤低于8%，且每折Profit Factor不低于1.20。失败结论同样写入数据库。
-
-当前已有的 `EMA_TREND` 批准记录只作为历史审计保留。执行安全和系统就绪查询只统计
-`BOLLINGER_RANGE 4.0.0`，旧EMA和旧版布林带记录都不能再授权Gate模拟开仓。
+权威实现见 `src/gold_crypto_quant/runtime/multi_timeframe_rotation_simulator.py` 和
+`src/gold_crypto_quant/strategy/bollinger_range.py`；完整规则、账户熔断和仓位计算细节
+见本地交接文档 `claude-handoff/01-当前策略V5.7.md`。`docs/` 目录下的历史策略文档
+（单ETH、`BOLLINGER_RANGE 4.0.0`、V4等）仅作历史审计保留，不代表当前运行策略。
+`EMA_TREND` 相关批准记录同样只作为历史审计保留。
 
 ## 即时邮件通知
 
