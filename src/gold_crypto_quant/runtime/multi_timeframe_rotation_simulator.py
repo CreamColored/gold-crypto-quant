@@ -912,6 +912,16 @@ def run_multi_timeframe_paper_cycle(
             return True
         return False
 
+    def structure_blocks_entry(
+        symbol: str,
+        interval: str,
+        side: str,
+        as_of: pd.Timestamp,
+    ) -> bool:
+        """开仓方向与结构相反时否决：做多遇顶背离、做空遇底背离都不开这一单。"""
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        return has_reversal_structure(symbol, interval, opposite, as_of)
+
     def stop_interval_open_time(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
         """把逐分钟止损时间归属到对应主周期K线，供完整收线等待规则使用。"""
         frequency = {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h"}[interval]
@@ -1057,8 +1067,10 @@ def run_multi_timeframe_paper_cycle(
                                 and not state.daily_blocked
                                 and not state.permanent_fuse
                             )
-                            if box_valid:
-                                new_side = "SHORT" if old_side == "LONG" else "LONG"
+                            new_side = "SHORT" if old_side == "LONG" else "LONG"
+                            if box_valid and not structure_blocks_entry(
+                                symbol, interval, new_side, minute_open_time
+                            ):
                                 open_position(
                                     new_side,
                                     symbol,
@@ -1122,7 +1134,12 @@ def run_multi_timeframe_paper_cycle(
                     touched_upper = float(minute_bar["high"]) >= upper
                     touched_lower = float(minute_bar["low"]) <= lower
                     # 同一分钟同时穿过上下轨时无法还原先后顺序，保守跳过而不猜测方向。
-                    if touched_upper != touched_lower:
+                    if touched_upper != touched_lower and not structure_blocks_entry(
+                        symbol,
+                        interval,
+                        "SHORT" if touched_upper else "LONG",
+                        minute_open_time,
+                    ):
                         side = "SHORT" if touched_upper else "LONG"
                         reference = upper if touched_upper else lower
                         open_position(
