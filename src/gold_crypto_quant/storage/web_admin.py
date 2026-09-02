@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import string
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -20,10 +21,27 @@ MAX_LOGIN_FAILURES = 5
 LOGIN_LOCK_MINUTES = 15
 
 
+def validate_password_strength(password: str) -> None:
+    """至少8位，且在大写、小写、数字、标点四类字符中至少满足3类，否则抛出ValueError。"""
+    if len(password) < 8:
+        raise ValueError("password must contain at least 8 characters")
+    classes_present = sum(
+        (
+            any(c.islower() for c in password),
+            any(c.isupper() for c in password),
+            any(c.isdigit() for c in password),
+            any(c in string.punctuation for c in password),
+        )
+    )
+    if classes_present < 3:
+        raise ValueError(
+            "password must contain at least 3 of: uppercase, lowercase, digit, punctuation"
+        )
+
+
 def hash_password(password: str) -> str:
     """使用带随机盐的scrypt保存密码，不依赖可逆加密或明文。"""
-    if len(password) < 12:
-        raise ValueError("password must contain at least 12 characters")
+    validate_password_strength(password)
     salt = secrets.token_bytes(16)
     derived = hashlib.scrypt(
         password.encode("utf-8"),

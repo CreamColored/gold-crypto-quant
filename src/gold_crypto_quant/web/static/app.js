@@ -12,6 +12,54 @@ async function getJSON(url) {
   return response.json();
 }
 
+// 统一刷新调度：监管页面必须让失败可见，静默失败会让人误以为看到的是最新数据。
+const REFRESH_BACKOFF_CEILING = 300000;
+let refreshFailures = 0;
+let lastSuccessLabel = "";
+let refreshTimer = null;
+
+const clockText = () => new Date().toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+
+function showFreshness(ok, text) {
+  const element = $("#data-freshness");
+  if (!element) return;
+  element.classList.toggle("stale", !ok);
+  element.textContent = text;
+}
+
+async function runRefresh(task) {
+  try {
+    await task();
+    refreshFailures = 0;
+    lastSuccessLabel = clockText();
+    showFreshness(true, `更新于 ${lastSuccessLabel}`);
+    return true;
+  } catch (error) {
+    // 401已经在getJSON里跳转登录页，不再当成刷新失败提示。
+    if (error && error.message === "Unauthorized") return false;
+    refreshFailures += 1;
+    console.error(error);
+    showFreshness(
+      false,
+      `⚠ 数据刷新失败（连续 ${refreshFailures} 次）· ${lastSuccessLabel ? `上次成功 ${lastSuccessLabel}` : "尚未取到数据"}`,
+    );
+    return false;
+  }
+}
+
+// 用setTimeout递归代替setInterval，失败时指数退避，避免后端异常时每10秒空打一次。
+function startPolling(task, baseInterval) {
+  const tick = async () => {
+    await runRefresh(task);
+    const delay = refreshFailures
+      ? Math.min(baseInterval * 2 ** refreshFailures, REFRESH_BACKOFF_CEILING)
+      : baseInterval;
+    refreshTimer = window.setTimeout(tick, delay);
+  };
+  if (refreshTimer) window.clearTimeout(refreshTimer);
+  tick();
+}
+
 function accountCard(account, detailed = false) {
   const health = account.health || {status:"WAITING",healthy:0,total:0};
   const positionText = account.positions.length ? account.positions.map(p => `${p.symbol.replace("_USDT","")} ${p.side === "LONG" ? "多" : "空"}`).join(" · ") : "无持仓";
@@ -36,22 +84,21 @@ function renderEquityChart(data) {
 }
 
 async function loadOverview() {
-  try {
-    const data = await getJSON("/api/overview");
-    const cards = $("#account-cards"); if (cards) cards.innerHTML = data.accounts.map(a => accountCard(a)).join("");
-    const detail = $("#accounts-detail"); if (detail) detail.innerHTML = data.accounts.map(a => accountCard(a,true)).join("");
-    if ($("#last-refresh")) $("#last-refresh").textContent = `更新于 ${localTime(data.generated_at)}`;
-    const stats = $("#summary-stats");
-    if (stats && data.accounts.length >= 2) {
-      const diff = data.accounts[0].equity - data.accounts[1].equity;
-      const open = data.accounts.reduce((n,a)=>n+a.positions.length,0);
-      const trades = data.accounts.reduce((n,a)=>n+a.closed_trades,0);
-      stats.innerHTML = `<article class="metric-card"><span>账户权益差</span><strong class="${trendClass(diff)}">${diff>=0?"+":""}${money(diff)} U</strong><small>Gate − 币安</small></article><article class="metric-card"><span>开放持仓</span><strong>${open}</strong><small>两个账户合计</small></article><article class="metric-card"><span>已完成交易</span><strong>${trades}</strong><small>持久化记录</small></article><article class="metric-card"><span>真实交易</span><strong class="safe-text">关闭</strong><small>订单提交不可用</small></article>`;
-    }
-    const events = $("#recent-events");
-    if (events) events.innerHTML = data.recent_events.length ? data.recent_events.map(event => `<div class="event-item"><span class="event-dot ${event.severity !== "INFO" ? "warning" : ""}"></span><div class="event-copy"><strong>${esc(event.exchange)} · ${esc(event.symbol)} · ${esc(event.title)}</strong><small>${esc(event.interval)} · ${esc(event.details["本次净盈亏"] || event.details["原因"] || "影子策略事件")}</small></div><time class="event-time">${localTime(event.time)}</time></div>`).join("") : `<div class="empty-state">暂无交易事件，策略正在等待有效触轨。</div>`;
-    renderEquityChart(data);
-  } catch (error) { console.error(error); }
+  // 不在此处吞掉异常：由 runRefresh 统一记账，否则失败无法触发退避和页面告警。
+  const data = await getJSON("/api/overview");
+  const cards = $("#account-cards"); if (cards) cards.innerHTML = data.accounts.map(a => accountCard(a)).join("");
+  const detail = $("#accounts-detail"); if (detail) detail.innerHTML = data.accounts.map(a => accountCard(a,true)).join("");
+  if ($("#last-refresh")) $("#last-refresh").textContent = `更新于 ${localTime(data.generated_at)}`;
+  const stats = $("#summary-stats");
+  if (stats && data.accounts.length >= 2) {
+    const diff = data.accounts[0].equity - data.accounts[1].equity;
+    const open = data.accounts.reduce((n,a)=>n+a.positions.length,0);
+    const trades = data.accounts.reduce((n,a)=>n+a.closed_trades,0);
+    stats.innerHTML = `<article class="metric-card"><span>账户权益差</span><strong class="${trendClass(diff)}">${diff>=0?"+":""}${money(diff)} U</strong><small>Gate − 币安</small></article><article class="metric-card"><span>开放持仓</span><strong>${open}</strong><small>两个账户合计</small></article><article class="metric-card"><span>已完成交易</span><strong>${trades}</strong><small>持久化记录</small></article><article class="metric-card"><span>真实交易</span><strong class="safe-text">关闭</strong><small>订单提交不可用</small></article>`;
+  }
+  const events = $("#recent-events");
+  if (events) events.innerHTML = data.recent_events.length ? data.recent_events.map(event => `<div class="event-item"><span class="event-dot ${event.severity !== "INFO" ? "warning" : ""}"></span><div class="event-copy"><strong>${esc(event.exchange)} · ${esc(event.symbol)} · ${esc(event.title)}</strong><small>${esc(event.interval)} · ${esc(event.details["本次净盈亏"] || event.details["原因"] || "影子策略事件")}</small></div><time class="event-time">${localTime(event.time)}</time></div>`).join("") : `<div class="empty-state">暂无交易事件，策略正在等待有效触轨。</div>`;
+  renderEquityChart(data);
 }
 
 let marketChart;
@@ -73,11 +120,18 @@ async function loadMarket() {
   marketChart.setOption({animation:false,color:["#0071e3","#ff453a","#8e8e93","#30d158"],legend:{top:3,data:["K线","上轨","中轨","下轨"],textStyle:{color:"#86868b"}},tooltip:{trigger:"axis",axisPointer:{type:"cross"}},grid:[{left:60,right:24,top:42,bottom:105},{left:60,right:24,height:55,bottom:35}],xAxis:[{type:"category",data:times,boundaryGap:true,axisLabel:{color:"#86868b",fontSize:9}},{type:"category",gridIndex:1,data:times,axisLabel:{show:false}}],yAxis:[{scale:true,axisLabel:{color:"#86868b",fontSize:9},splitLine:{lineStyle:{color:"rgba(128,128,128,.12)"}}},{gridIndex:1,scale:true,axisLabel:{show:false},splitLine:{show:false}}],dataZoom:[{type:"inside",xAxisIndex:[0,1],start:40,end:100},{type:"slider",xAxisIndex:[0,1],bottom:6,height:20}],series:[{name:"K线",type:"candlestick",data:rows.map(r=>[r.open,r.close,r.low,r.high]),itemStyle:{color:"#30d158",color0:"#ff453a",borderColor:"#30d158",borderColor0:"#ff453a"}},{name:"上轨",type:"line",data:rows.map(r=>r.upper),showSymbol:false,lineStyle:{width:1.2}},{name:"中轨",type:"line",data:rows.map(r=>r.middle),showSymbol:false,lineStyle:{width:1.1}},{name:"下轨",type:"line",data:rows.map(r=>r.lower),showSymbol:false,lineStyle:{width:1.2}},{name:"成交量",type:"bar",xAxisIndex:1,yAxisIndex:1,data:rows.map(r=>r.volume),itemStyle:{color:"rgba(0,113,227,.28)"}}]});
 }
 
-async function loadTrades() {
+let tradePage=1;
+const TRADE_PAGE_SIZE=20;
+async function loadTrades(page=tradePage) {
   const venue=$("#trade-venue")?.value||"",symbol=$("#trade-symbol")?.value||"";
-  const rows=await getJSON(`/api/trades?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}`);
-  $("#trade-count").textContent=`${rows.length} 条`;
+  const data=await getJSON(`/api/trades?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}&page=${page}&page_size=${TRADE_PAGE_SIZE}`);
+  tradePage=data.page;
+  const rows=data.items;
+  $("#trade-count").textContent=`${data.total} 条`;
   $("#trade-body").innerHTML=rows.length?rows.map(row=>{const result=row.details["本次净盈亏"]||row.details["整笔累计净盈亏"]||"—";return `<tr><td>${localTime(row.time,true)}</td><td><span class="exchange-chip ${row.exchange==="币安"?"binance":""}">${esc(row.exchange)}</span></td><td>${esc(row.symbol)}</td><td>${esc(row.interval)}</td><td class="event-title-cell"><strong>${esc(row.title)}</strong><small>${esc(row.details["原因"]||row.details["方向"]||row.event_type)}</small></td><td class="result-chip ${String(result).startsWith("+")?"positive":String(result).startsWith("-")?"negative":""}">${esc(result)}</td></tr>`}).join(""):`<tr><td colspan="6" class="empty-cell">暂无符合条件的交易事件</td></tr>`;
+  $("#trade-page-info").textContent=`第 ${data.page} / ${data.total_pages} 页`;
+  $("#trade-prev").disabled=data.page<=1;
+  $("#trade-next").disabled=data.page>=data.total_pages;
 }
 
 function uptime(seconds){const d=Math.floor(seconds/86400),h=Math.floor(seconds%86400/3600),m=Math.floor(seconds%3600/60);return `${d}天 ${h}小时 ${m}分钟`;}
@@ -85,9 +139,23 @@ async function loadSystem(){const data=await getJSON("/api/system");$("#system-c
 
 document.addEventListener("DOMContentLoaded",()=>{
   const page=document.body.dataset.page;
-  if(page==="dashboard"){loadOverview();setInterval(loadOverview,10000);}
-  if(page==="accounts"){loadOverview();setInterval(loadOverview,15000);}
-  if(page==="market"){loadMarket();$("#market-refresh").addEventListener("click",loadMarket);["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",loadMarket));setInterval(loadMarket,30000);}
-  if(page==="trades"){loadTrades();$("#trade-refresh").addEventListener("click",loadTrades);$("#trade-venue").addEventListener("change",loadTrades);$("#trade-symbol").addEventListener("change",loadTrades);}
-  if(page==="system"){loadSystem();setInterval(loadSystem,10000);}
+  // 手动触发也走同一套记账，点刷新失败时同样会在页面上报错而不是静默。
+  const manual=task=>()=>runRefresh(task);
+  if(page==="dashboard"){startPolling(loadOverview,10000);}
+  if(page==="accounts"){startPolling(loadOverview,15000);}
+  if(page==="market"){
+    startPolling(loadMarket,30000);
+    $("#market-refresh").addEventListener("click",manual(loadMarket));
+    ["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",manual(loadMarket)));
+  }
+  if(page==="trades"){
+    const reload=manual(()=>loadTrades(1));
+    runRefresh(()=>loadTrades(1));
+    $("#trade-refresh").addEventListener("click",reload);
+    $("#trade-venue").addEventListener("change",reload);
+    $("#trade-symbol").addEventListener("change",reload);
+    $("#trade-prev").addEventListener("click",manual(()=>loadTrades(tradePage-1)));
+    $("#trade-next").addEventListener("click",manual(()=>loadTrades(tradePage+1)));
+  }
+  if(page==="system"){startPolling(loadSystem,10000);}
 });

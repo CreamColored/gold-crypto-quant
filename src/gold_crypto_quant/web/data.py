@@ -83,7 +83,7 @@ def _active_boxes(state: dict[str, Any]) -> list[str]:
 
 def _latest_prices(session: Session, venue: str) -> dict[str, float]:
     prices: dict[str, float] = {}
-    for symbol in ("BTC_USDT", "ETH_USDT"):
+    for symbol in ("BTC_USDT", "ETH_USDT", "XAU_USDT"):
         statement = (
             select(MarketBar.close_price)
             .join(Instrument, Instrument.id == MarketBar.instrument_id)
@@ -223,7 +223,7 @@ def build_market_chart(
     """返回交互K线、布林带和震荡判断所需数据。"""
     if venue not in VENUE_INFO:
         raise ValueError("unsupported venue")
-    if symbol not in {"BTC_USDT", "ETH_USDT"}:
+    if symbol not in {"BTC_USDT", "ETH_USDT", "XAU_USDT"}:
         raise ValueError("unsupported symbol")
     if interval not in {"1m", "5m", "15m", "30m", "1h"}:
         raise ValueError("unsupported interval")
@@ -277,22 +277,39 @@ def build_trade_events(
     *,
     venue: str | None = None,
     symbol: str | None = None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    """按交易所和品种筛选影子交易事件。"""
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """按交易所和品种分页返回影子交易事件，附带总数用于翻页。"""
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
     with Session(engine) as session:
+        base_statement = select(ShadowTradeEvent).join(
+            TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id
+        )
+        if venue:
+            base_statement = base_statement.where(TradingAccount.venue == venue)
+        if symbol:
+            base_statement = base_statement.where(ShadowTradeEvent.symbol == symbol)
+
+        total = session.execute(
+            select(func.count()).select_from(base_statement.subquery())
+        ).scalar_one()
+
         statement = (
             select(ShadowTradeEvent, TradingAccount.display_name, TradingAccount.venue)
             .join(TradingAccount, TradingAccount.id == ShadowTradeEvent.trading_account_id)
             .order_by(ShadowTradeEvent.event_time.desc(), ShadowTradeEvent.id.desc())
-            .limit(min(max(limit, 1), 500))
+            .limit(page_size)
+            .offset((page - 1) * page_size)
         )
         if venue:
             statement = statement.where(TradingAccount.venue == venue)
         if symbol:
             statement = statement.where(ShadowTradeEvent.symbol == symbol)
         rows = session.execute(statement).all()
-    return [
+
+    items = [
         {
             "id": event.id,
             "account": account_name,
@@ -308,6 +325,14 @@ def build_trade_events(
         }
         for event, account_name, event_venue in rows
     ]
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 def build_system_status() -> dict[str, Any]:

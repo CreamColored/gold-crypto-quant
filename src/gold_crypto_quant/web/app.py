@@ -19,6 +19,7 @@ from gold_crypto_quant.storage.web_admin import (
     create_admin_if_missing,
     get_active_admin,
     save_admin_audit,
+    validate_password_strength,
 )
 from gold_crypto_quant.web.data import (
     build_market_chart,
@@ -40,6 +41,16 @@ def _session_secret() -> str:
     return SESSION_SECRET_PATH.read_text(encoding="utf-8").strip()
 
 
+def _static_version() -> str:
+    """返回静态目录最新修改时间，用作资源URL的缓存版本号。"""
+    static_dir = PACKAGE_DIR / "static"
+    try:
+        latest = max(path.stat().st_mtime for path in static_dir.iterdir() if path.is_file())
+    except (OSError, ValueError):
+        return "0"
+    return str(int(latest))
+
+
 def create_app(engine: Engine | None = None) -> FastAPI:
     """创建可测试的Web应用；所有业务接口均要求admin会话。"""
     settings = get_settings()
@@ -59,6 +70,8 @@ def create_app(engine: Engine | None = None) -> FastAPI:
     )
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+    # 静态资源URL带上文件修改时间；样式或脚本一变URL就变，浏览器和CDN不会再用旧缓存。
+    templates.env.globals["static_version"] = _static_version
 
     def current_admin(request: Request):
         user_id = request.session.get("user_id")
@@ -155,9 +168,12 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(status_code=403)
         if new_password != confirm_password:
             error = "两次输入的新密码不一致。"
-        elif len(new_password) < 12:
-            error = "新密码至少需要12个字符。"
-        elif not change_admin_password(
+        else:
+            try:
+                validate_password_strength(new_password)
+            except ValueError:
+                error = "新密码至少8个字符，且需含大写、小写、数字、标点中至少3类。"
+        if not error and not change_admin_password(
             user.id,
             current_password,
             new_password,
@@ -259,9 +275,17 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         request: Request,
         venue: str | None = None,
         symbol: str | None = None,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
         _user=Depends(current_admin),
     ):
-        return build_trade_events(request.app.state.engine, venue=venue, symbol=symbol)
+        return build_trade_events(
+            request.app.state.engine,
+            venue=venue,
+            symbol=symbol,
+            page=page,
+            page_size=page_size,
+        )
 
     @app.get("/api/system")
     def system_api(_user=Depends(current_admin)):

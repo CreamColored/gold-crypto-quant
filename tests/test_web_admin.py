@@ -2,9 +2,14 @@
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
-from gold_crypto_quant.storage.web_admin import hash_password, verify_password
+from gold_crypto_quant.storage.web_admin import (
+    hash_password,
+    validate_password_strength,
+    verify_password,
+)
 
 
 def test_scrypt_password_hash_is_salted_and_verifiable() -> None:
@@ -15,6 +20,31 @@ def test_scrypt_password_hash_is_salted_and_verifiable() -> None:
     assert first.startswith("scrypt$")
     assert verify_password("Correct-Horse-2026", first)
     assert not verify_password("wrong-password", first)
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        "Abcdef12",  # 大写+小写+数字，8位
+        "r@In4ugust",  # 小写+数字+标点
+        "PASSWORD1!",  # 大写+数字+标点
+    ],
+)
+def test_password_strength_accepts_three_of_four_classes(password: str) -> None:
+    validate_password_strength(password)
+
+
+@pytest.mark.parametrize(
+    "password",
+    [
+        "abcdefgh",  # 8位，只有小写一类
+        "abcd1234",  # 8位，只有小写+数字两类
+        "Ab1!cde",  # 7位，四类齐全但长度不足8位
+    ],
+)
+def test_password_strength_rejects_weak_passwords(password: str) -> None:
+    with pytest.raises(ValueError):
+        validate_password_strength(password)
 
 
 def test_login_page_is_public_but_dashboard_requires_session(monkeypatch, tmp_path) -> None:

@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>{% block title %}Moon监管中心{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}?v={{ static_version() }}">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"
           integrity="sha384-pPi0zxBAoDu6+JXW/C68UZLvBUUtU+7zonhif43rqj7pxsGyqyqzcian2Rj37Rss"
           crossorigin="anonymous" defer></script>
-  <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+  <script src="{{ url_for('static', path='/app.js') }}?v={{ static_version() }}" defer></script>
 </head>
 <body data-page="{{ active_page }}">
   <div class="app-shell">
@@ -43,6 +43,7 @@
         <a class="brand compact" href="/"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg></span><strong>Moon</strong></a>
         <span class="readonly-pill">只读监管</span>
       </header>
+      <div id="data-freshness" class="data-freshness" role="status" aria-live="polite">正在加载…</div>
       {% block content %}{% endblock %}
     </main>
   </div>
