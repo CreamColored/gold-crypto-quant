@@ -809,3 +809,196 @@ class EmailDeliveryLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="审计记录创建时间UTC"
     )
+
+
+class AppUser(Base):
+    """Web监管后台用户；超级管理员不直接归属任何交易账户。"""
+
+    __tablename__ = "app_users"
+    __table_args__ = {"comment": "Web后台用户，保存登录身份、角色和密码安全状态"}
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="后台用户主键ID"
+    )
+    username: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, comment="唯一登录用户名"
+    )
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="页面显示名称")
+    password_hash: Mapped[str] = mapped_column(
+        String(255), nullable=False, comment="使用scrypt生成的不可逆密码摘要"
+    )
+    role: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="用户角色SUPER_ADMIN或TRADER"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("1"), comment="是否允许登录后台"
+    )
+    force_password_change: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("1"), comment="登录后是否必须修改初始密码"
+    )
+    failed_login_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), comment="连续登录失败次数"
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(fsp=6), comment="登录失败触发的临时锁定截止时间UTC"
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(fsp=6), comment="最近一次成功登录时间UTC"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="用户创建时间UTC"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT,
+        onupdate=datetime.utcnow, comment="用户最后更新时间UTC"
+    )
+
+
+class TradingAccount(Base):
+    """统一描述系统实验账户和未来各用户的模拟或正式交易账户。"""
+
+    __tablename__ = "trading_accounts"
+    __table_args__ = (
+        Index("ix_trading_account_owner", "owner_user_id", "is_active"),
+        {"comment": "统一交易账户目录，区分用户、交易所、市场和影子模拟正式环境"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="交易账户主键ID"
+    )
+    account_code: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, comment="系统内唯一账户代码"
+    )
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="账户显示名称")
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="RESTRICT"), comment="普通用户ID，系统账户为空"
+    )
+    owner_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="账户归属类型SYSTEM或USER"
+    )
+    venue: Mapped[str] = mapped_column(String(32), nullable=False, comment="交易所或经纪商代码")
+    market_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="市场类型CRYPTO_FUTURES或GOLD"
+    )
+    environment: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="账户环境SHADOW、DEMO或LIVE"
+    )
+    currency: Mapped[str] = mapped_column(String(16), nullable=False, comment="账户权益计价币种")
+    strategy_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="当前绑定的策略版本"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("1"), comment="是否纳入监管后台"
+    )
+    trading_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("0"), comment="是否允许提交订单，当前固定关闭"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="账户登记时间UTC"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT,
+        onupdate=datetime.utcnow, comment="账户最后更新时间UTC"
+    )
+
+
+class ShadowEquitySnapshot(Base):
+    """双行情影子账户的权益时间序列，供Web曲线和回撤统计使用。"""
+
+    __tablename__ = "shadow_equity_snapshots"
+    __table_args__ = (
+        UniqueConstraint("trading_account_id", "snapshot_time", name="uq_shadow_equity_snapshot"),
+        Index("ix_shadow_equity_account_time", "trading_account_id", "snapshot_time"),
+        {"comment": "影子账户权益快照，保存双交易所独立权益、峰值和风控状态"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="影子权益快照主键ID"
+    )
+    trading_account_id: Mapped[int] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="RESTRICT"), nullable=False,
+        comment="关联影子交易账户ID"
+    )
+    snapshot_time: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, comment="快照时间UTC"
+    )
+    equity: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="影子账户当前权益"
+    )
+    peak_equity: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="影子账户历史最高权益"
+    )
+    day_start_equity: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="当前交易日起始权益"
+    )
+    open_position_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="当前开放仓位数量"
+    )
+    risk_state: Mapped[str] = mapped_column(String(24), nullable=False, comment="影子账户风控状态")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="记录创建时间UTC"
+    )
+
+
+class ShadowTradeEvent(Base):
+    """影子策略产生的开仓、减仓、平仓和风控事件。"""
+
+    __tablename__ = "shadow_trade_events"
+    __table_args__ = (
+        Index("ix_shadow_event_account_time", "trading_account_id", "event_time"),
+        {"comment": "影子交易事件，保存交易所、品种、周期、原因和资金变化"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="影子交易事件主键ID"
+    )
+    event_key: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True, comment="事件幂等唯一键"
+    )
+    trading_account_id: Mapped[int] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="RESTRICT"), nullable=False,
+        comment="关联影子交易账户ID"
+    )
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, comment="事件发生时间UTC"
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="交易品种代码")
+    interval_code: Mapped[str] = mapped_column(String(8), nullable=False, comment="策略交易周期")
+    title: Mapped[str] = mapped_column(String(255), nullable=False, comment="事件标题")
+    event_type: Mapped[str] = mapped_column(
+        String(24), nullable=False, comment="事件类型OPEN、REDUCE、CLOSE、RISK或STATUS"
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, comment="事件严重级别")
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="事件完整字段和值"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="记录创建时间UTC"
+    )
+
+
+class AdminAuditLog(Base):
+    """超级管理员登录和监管操作审计，不允许承载下单动作。"""
+
+    __tablename__ = "admin_audit_logs"
+    __table_args__ = (
+        Index("ix_admin_audit_time", "created_at"),
+        {"comment": "超级管理员安全审计，记录登录、退出、密码和用户管理操作"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="管理审计主键ID"
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL"), comment="执行操作的后台用户ID"
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False, comment="监管操作类型")
+    result: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="操作结果SUCCESS或FAILED"
+    )
+    ip_address: Mapped[str | None] = mapped_column(String(64), comment="访问来源IP地址")
+    user_agent: Mapped[str | None] = mapped_column(String(512), comment="浏览器User-Agent摘要")
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="不含密钥的操作上下文")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="审计记录时间UTC"
+    )

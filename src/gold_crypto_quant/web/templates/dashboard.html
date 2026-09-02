@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}总览 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">OVERVIEW</p><h1>Moon监管中心</h1><p>同一策略、独立行情，实时观察 Gate 与币安影子账户。</p></div>
+  <div class="heading-status"><span class="status-dot green pulse"></span><span><strong>双行情运行中</strong><small id="last-refresh">正在读取数据</small></span></div>
+</section>
+<section id="account-cards" class="account-grid loading-grid"><div class="skeleton tall"></div><div class="skeleton tall"></div></section>
+<section class="stats-grid" id="summary-stats">
+  <article class="metric-card"><span>账户权益差</span><strong>—</strong><small>Gate − 币安</small></article>
+  <article class="metric-card"><span>开放持仓</span><strong>—</strong><small>两个账户合计</small></article>
+  <article class="metric-card"><span>已完成交易</span><strong>—</strong><small>持久化记录</small></article>
+  <article class="metric-card"><span>真实交易</span><strong class="safe-text">关闭</strong><small>订单提交不可用</small></article>
+</section>
+<section class="content-grid">
+  <article class="panel chart-panel">
+    <div class="panel-heading"><div><h2>账户权益</h2><p>Gate 与币安独立影子账户</p></div><span class="soft-pill">实时</span></div>
+    <div id="equity-chart" class="chart large"><div class="chart-placeholder">正在载入权益曲线…</div></div>
+  </article>
+  <article class="panel events-panel">
+    <div class="panel-heading"><div><h2>最近事件</h2><p>开仓、减仓、平仓与风控</p></div><a href="/trades">查看全部</a></div>
+    <div id="recent-events" class="event-list"><div class="empty-state">暂无交易事件</div></div>
+  </article>
+</section>
+{% endblock %}

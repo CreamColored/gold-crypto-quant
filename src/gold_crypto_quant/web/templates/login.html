@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>登录 · Moon监管中心</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <div class="brand auth-brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg></span><span><strong>Moon</strong><small>监管中心</small></span></div>
+    <div class="auth-heading"><h1>欢迎回来</h1><p>使用超级管理员账户进入只读监管后台。</p></div>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    {% if initial_password_created %}<div class="alert info">管理员已初始化，请使用终端中显示的一次性密码登录。</div>{% endif %}
+    <form action="/login" method="post" class="auth-form">
+      <label>用户名<input name="username" value="admin" autocomplete="username" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required autofocus></label>
+      <button class="primary-button" type="submit">进入监管中心</button>
+    </form>
+    <div class="auth-safety"><span class="status-dot green"></span>此账户不能下单、平仓或修改策略</div>
+  </main>
+</body>
+</html>

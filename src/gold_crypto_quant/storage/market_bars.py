@@ -11,6 +11,7 @@ from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument, MarketBar
 
 EXPECTED_INTERVALS = {
+    "1m": pd.Timedelta(minutes=1),
     "5m": pd.Timedelta(minutes=5),
     "15m": pd.Timedelta(minutes=15),
     "30m": pd.Timedelta(minutes=30),

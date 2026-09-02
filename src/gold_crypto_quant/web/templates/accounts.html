@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}账户权益 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading compact-heading"><div><p class="eyebrow">ACCOUNTS</p><h1>系统实验账户</h1><p>admin仅监管，账户无所属交易用户且无法提交订单。</p></div></section>
+<section id="accounts-detail" class="account-detail-grid"><div class="skeleton tall"></div><div class="skeleton tall"></div></section>
+<section class="panel architecture-card">
+  <div class="panel-heading"><div><h2>账户隔离</h2><p>为后续正式交易和黄金平台预留</p></div><span class="soft-pill safe">已启用</span></div>
+  <div class="architecture-flow"><div><strong>admin</strong><small>只读监管</small></div><span>→</span><div><strong>系统实验</strong><small>Gate / 币安</small></div><span>→</span><div><strong>独立账户</strong><small>仓位 / 权益 / 事件</small></div></div>
+</section>
+{% endblock %}

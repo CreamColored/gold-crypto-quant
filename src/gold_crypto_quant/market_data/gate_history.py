@@ -14,6 +14,7 @@ from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument, MarketBar
 
 GATE_TESTNET_VENUE = "GATE_TESTNET"
+GATE_LIVE_VENUE = "GATE_LIVE_PUBLIC"
 DEFAULT_CONTRACTS = ("BTC_USDT", "ETH_USDT")
 DEFAULT_INTERVALS = ("5m", "15m", "30m", "1h")
 # Gate测试网会拒绝早于“最近10000个点”的K线范围；预留两个周期处理当前未收盘边界。
@@ -21,6 +22,7 @@ GATE_RECENT_POINT_LIMIT = 10_000
 
 # 用固定映射计算K线收盘时间，避免字符串解析差异影响“是否已经收盘”的判断。
 INTERVAL_DURATION = {
+    "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
     "30m": timedelta(minutes=30),
@@ -52,12 +54,17 @@ def _split_contract(contract: str) -> tuple[str, str]:
     return base_asset, quote_asset
 
 
-def _ensure_instrument(session: Session, contract: str) -> Instrument:
+def _ensure_instrument(
+    session: Session,
+    contract: str,
+    *,
+    venue: str = GATE_TESTNET_VENUE,
+) -> Instrument:
     """登记或重新启用 Gate 合约，并返回数据库中的品种对象。"""
     base_asset, quote_asset = _split_contract(contract)
     # MySQL ON DUPLICATE KEY UPDATE 让初始化可以安全重复执行，不会产生重复品种。
     statement = mysql_insert(Instrument).values(
-        venue=GATE_TESTNET_VENUE,
+        venue=venue,
         symbol=contract,
         asset_class="CRYPTO_FUTURES",
         base_asset=base_asset,
@@ -70,7 +77,7 @@ def _ensure_instrument(session: Session, contract: str) -> Instrument:
     # 通过唯一业务键重新查询，避免依赖“插入或更新”两种情况下不同的自增ID行为。
     return session.execute(
         select(Instrument).where(
-            Instrument.venue == GATE_TESTNET_VENUE,
+            Instrument.venue == venue,
             Instrument.symbol == contract,
         )
     ).scalar_one()
@@ -116,7 +123,12 @@ def _build_bar_rows(
                 "close_price": Decimal(str(candle["close"])),
                 "volume": Decimal(str(candle["volume"])),
                 "quote_volume": Decimal(str(candle["quote_volume"])),
-                "trade_count": None,
+                # Gate 当前不提供该字段；币安标准化K线包含成交笔数时一并保存。
+                "trade_count": (
+                    int(candle["trade_count"])
+                    if "trade_count" in candle and pd.notna(candle["trade_count"])
+                    else None
+                ),
                 "is_closed": True,
             }
         )
@@ -186,6 +198,7 @@ def import_gate_history(
     intervals: tuple[str, ...] = DEFAULT_INTERVALS,
     limit: int = 1000,
     history_days: int | None = None,
+    venue: str = GATE_TESTNET_VENUE,
 ) -> list[ImportResult]:
     """导入最近K线，并可从数据库最早时间向前分批回溯指定天数。"""
     invalid_intervals = set(intervals) - SUPPORTED_INTERVALS
@@ -207,7 +220,7 @@ def import_gate_history(
             if contract_info.in_delisting:
                 raise RuntimeError(f"Gate contract is delisting: {contract}")
 
-            instrument = _ensure_instrument(session, contract)
+            instrument = _ensure_instrument(session, contract, venue=venue)
             instrument_id = instrument.id
             session.commit()
             for interval in intervals:

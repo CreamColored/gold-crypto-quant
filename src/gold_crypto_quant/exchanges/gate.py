@@ -19,10 +19,11 @@ import pandas as pd
 
 from gold_crypto_quant.config import Settings, get_settings
 
-# 当前策略只允许这四个周期。集中校验可避免把错误周期传给 Gate 后静默返回意外数据。
-SUPPORTED_INTERVALS = frozenset({"5m", "15m", "30m", "1h"})
-INTERVAL_SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
+# 1分钟仅用于主策略的微周期过滤；3分钟由连续1分钟K线本地聚合。
+SUPPORTED_INTERVALS = frozenset({"1m", "5m", "15m", "30m", "1h"})
+INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 GATE_TESTNET_HOST = "api-testnet.gateapi.io"
+GATE_LIVE_HOSTS = frozenset({"api.gateio.ws", "fx-api.gateio.ws"})
 
 
 class GateApiError(RuntimeError):
@@ -297,3 +298,36 @@ class GateTestnetClient:
             hashlib.sha512,
         ).hexdigest()
         return {"KEY": self._api_key, "Timestamp": timestamp, "SIGN": signature}
+
+
+class GatePublicClient(GateTestnetClient):
+    """Gate实盘USDT永续只读公共行情客户端，不接受或保存任何API密钥。"""
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://api.gateio.ws/api/v4",
+        timeout: float = 10.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        parsed_url = urlsplit(base_url)
+        if parsed_url.hostname not in GATE_LIVE_HOSTS:
+            raise ValueError(
+                f"Gate public client only allows live hosts: {sorted(GATE_LIVE_HOSTS)}"
+            )
+        self._base_url = base_url.rstrip("/")
+        self._api_prefix = parsed_url.path.rstrip("/") or "/api/v4"
+        # 公共行情请求永远不会调用签名；保留空值只是复用父类的只读解析实现。
+        self._api_key = ""
+        self._api_secret = b""
+        self._http = httpx.Client(
+            base_url=self._base_url,
+            timeout=timeout,
+            transport=transport,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+
+    def get_account(self, settle: str = "usdt") -> GateFuturesAccount:
+        """公共客户端明确拒绝私有账户访问，防止未来误把它扩展成实盘交易客户端。"""
+        del settle
+        raise PermissionError("Gate public market client cannot access private accounts")

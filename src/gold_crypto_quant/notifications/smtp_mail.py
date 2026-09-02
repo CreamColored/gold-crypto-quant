@@ -12,6 +12,7 @@ from pathlib import Path
 
 import psutil
 
+from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.storage.execution_status import read_execution_safety_status
 from gold_crypto_quant.storage.paper_simulation import read_paper_simulation_state
 from gold_crypto_quant.storage.service_state import read_service_state
@@ -231,6 +232,7 @@ def _build_market_chart_png(
     *,
     event_title: str,
     event_lines: tuple[str, ...],
+    venue: str = GATE_TESTNET_VENUE,
 ) -> bytes | None:
     """为交易事件生成近期价格和布林带PNG；失败时省略图表且不阻断告警邮件。"""
     if not any(keyword in event_title for keyword in ("开仓", "减仓", "平仓", "成交")):
@@ -255,7 +257,8 @@ def _build_market_chart_png(
             parameters_for_same_timeframe,
         )
 
-        bars = load_market_bars(symbol, interval, limit=80)
+        # 双行情对照时必须读取事件所属交易所的数据，不能继续默认使用Gate测试网。
+        bars = load_market_bars(symbol, interval, limit=80, venue=venue)
         context = build_rotation_box_context(bars, parameters_for_same_timeframe(interval))
         display = bars.join(context[["bb_upper", "bb_middle", "bb_lower"]]).tail(48).dropna()
         if display.empty:
@@ -362,6 +365,9 @@ def build_gate_event_email(
     event_title: str,
     event_lines: tuple[str, ...],
     severity: str = "INFO",
+    venue: str = GATE_TESTNET_VENUE,
+    comparison_status_lines: tuple[str, ...] | None = None,
+    process_id_override: int | None = None,
 ) -> StatusEmailMessage:
     """生成交易或异常事件邮件，并附带当时的账户与Mac状态。"""
     if now.tzinfo is None:
@@ -371,7 +377,11 @@ def build_gate_event_email(
     service = read_service_state(GATE_SERVICE_NAME)
     safety = read_execution_safety_status(oanda_enabled=False)
     local_time = now.astimezone()
-    process_id = service.process_id if service is not None else None
+    process_id = (
+        process_id_override
+        if process_id_override is not None
+        else (service.process_id if service is not None else None)
+    )
     subject = f"[量化{severity}] {event_title} {local_time:%Y-%m-%d %H:%M:%S}"
     primary_lines = (
         f"事件时间：{local_time:%Y-%m-%d %H:%M:%S %z}",
@@ -379,7 +389,7 @@ def build_gate_event_email(
         f"事件名称：{event_title}",
         *event_lines,
     )
-    status_lines = (
+    status_lines = comparison_status_lines or (
         f"活动策略批准数：{safety.approved_qualifications}",
         f"活动订单：{safety.active_orders}",
         f"开放持仓：{safety.open_positions}",
@@ -391,7 +401,11 @@ def build_gate_event_email(
     )
     system_lines = _build_system_status_lines(process_id, now)
     body_lines = primary_lines + ("", "交易与风控状态") + status_lines + system_lines
-    chart_png = _build_market_chart_png(event_title=event_title, event_lines=event_lines)
+    chart_png = _build_market_chart_png(
+        event_title=event_title,
+        event_lines=event_lines,
+        venue=venue,
+    )
     chart_cid = "market-chart" if chart_png is not None else None
     html_body = _build_html_document(
         title=event_title,

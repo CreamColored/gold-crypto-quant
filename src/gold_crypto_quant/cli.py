@@ -47,6 +47,9 @@ from gold_crypto_quant.runtime import (
     run_paper_signal_cycle,
 )
 from gold_crypto_quant.runtime.oanda_paper_entry import execute_approved_oanda_paper_entry
+from gold_crypto_quant.runtime.public_market_comparison_runner import (
+    PublicMarketComparisonRunner,
+)
 from gold_crypto_quant.storage import (
     check_connection,
     create_schema,
@@ -143,6 +146,9 @@ def main() -> None:
             "market-health",
             "market-runner",
             "market-runner-status",
+            "public-market-comparison",
+            "web-init-admin",
+            "web-run",
             "oanda-runner",
             "oanda-runner-status",
             "oanda-account-check",
@@ -220,6 +226,45 @@ def main() -> None:
         # 已有表不会被 create_all 更新；该命令专门同步模型中的表注释和字段注释。
         sync_schema_comments()
         print("Database comments synchronized")
+        return
+    if args.command == "web-init-admin":
+        # 只创建缺失表和唯一admin；重复执行绝不重置已有管理员密码。
+        from gold_crypto_quant.storage.shadow_monitor import ensure_system_shadow_accounts
+        from gold_crypto_quant.storage.web_admin import create_admin_if_missing
+
+        create_schema()
+        ensure_system_shadow_accounts()
+        initial_password = create_admin_if_missing()
+        if initial_password is None:
+            print("Admin account already exists; password was not changed")
+        else:
+            print("Admin account created")
+            print("Username: admin")
+            print(f"One-time password: {initial_password}")
+            print("Change this password immediately after the first login")
+        return
+    if args.command == "web-run":
+        # Web后台只有只读查询和admin安全设置，不包含交易、撤单或策略修改接口。
+        import uvicorn
+
+        from gold_crypto_quant.web import create_app
+
+        app = create_app()
+        if app.state.initial_admin_password:
+            _runtime_log("首次admin已创建")
+            print("Username: admin")
+            print(f"One-time password: {app.state.initial_admin_password}")
+            print("Change this password immediately after the first login")
+        _runtime_log(
+            f"Web监管后台启动：http://{settings.web_host}:{settings.web_port}；"
+            "admin只读，真实交易关闭"
+        )
+        uvicorn.run(
+            app,
+            host=settings.web_host,
+            port=settings.web_port,
+            access_log=False,
+        )
         return
     if args.command == "import-gate-bars":
         # with 会在导入结束或异常时关闭 Gate 网络连接，避免连接池资源泄漏。
@@ -1067,6 +1112,27 @@ def main() -> None:
                 print(f"  原因: {health.reason}")
         print("Exchange order submission available: False")
         return
+    if args.command == "public-market-comparison":
+        # 两个实盘公共行情源只进入隔离的本地影子账户，不读取任何交易所API密钥。
+        create_schema()
+        comparison_stop = Event()
+        runner = PublicMarketComparisonRunner(
+            settings,
+            poll_seconds=args.poll_seconds,
+            limit=args.limit,
+            max_cycles=args.max_cycles or 10_080,
+            stop_event=comparison_stop,
+            reporter=_runtime_log,
+        )
+        _runtime_log("Gate/币安实盘公共行情七天对照启动；真实交易始终关闭")
+        with (
+            SingleInstanceLock(Path(".runtime/public-market-comparison.lock")),
+            install_shutdown_signal_handlers(comparison_stop),
+        ):
+            cycles = runner.run()
+        _runtime_log(f"Gate/币安公共行情对照已安全停止，完成{cycles}轮")
+        _runtime_log("Exchange order submission available: False")
+        return
     if args.command == "market-runner":
         if any(_venue_for_symbol(contract) != GATE_TESTNET_VENUE for contract in args.contracts):
             raise ValueError(
@@ -1075,9 +1141,13 @@ def main() -> None:
             )
         # 调用幂等建表，首次启动时创建服务运行状态表及其他尚未存在的核心表。
         create_schema()
+        # 开启布林带影子信号时额外采集1分钟；它只用于开仓过滤，不进入交易周期优先级。
+        runner_intervals = tuple(
+            dict.fromkeys((*args.intervals, *(("1m",) if args.enable_signals else ())))
+        )
         runner_config = RunnerConfig(
             contracts=tuple(args.contracts),
-            intervals=tuple(args.intervals),
+            intervals=runner_intervals,
             limit=args.limit,
             poll_seconds=args.poll_seconds,
             retry_initial_seconds=args.retry_initial_seconds,

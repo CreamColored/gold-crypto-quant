@@ -21,9 +21,7 @@ from gold_crypto_quant.storage.service_state import save_service_state
 
 MARKET_DATA_SERVICE_NAME = "GATE_TESTNET_MARKET_DATA"
 OANDA_MARKET_DATA_SERVICE_NAME = "OANDA_PRACTICE_MARKET_DATA"
-_SECRET_FIELD_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|secret|password|token)(\s*[:=]\s*)([^\s,;]+)"
-)
+_SECRET_FIELD_PATTERN = re.compile(r"(?i)(api[_-]?key|secret|password|token)(\s*[:=]\s*)([^\s,;]+)")
 _DATABASE_CREDENTIAL_PATTERN = re.compile(r"://[^:@/\s]+:[^@/\s]+@")
 
 
@@ -32,7 +30,7 @@ class RunnerConfig:
     """行情轮询服务的受控运行参数。"""
 
     contracts: tuple[str, ...] = ("BTC_USDT", "ETH_USDT")
-    intervals: tuple[str, ...] = ("5m", "15m", "30m", "1h")
+    intervals: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h")
     limit: int = 500
     poll_seconds: float = 60.0
     retry_initial_seconds: float = 5.0
@@ -283,9 +281,7 @@ class MarketDataRunner:
                         "SERVICE_RECOVERED",
                         f"行情服务在连续失败{recovered_failures}次后恢复",
                     )
-                self.reporter(
-                    f"行情轮询第{successful_cycles}轮完成，刷新{updated_bars}条已收盘K线"
-                )
+                self.reporter(f"行情轮询第{successful_cycles}轮完成，刷新{updated_bars}条已收盘K线")
                 # 成功后调用状态保存清零连续失败和最近错误，发布本轮服务心跳。
                 self._save_state(
                     "RUNNING",

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}交易记录 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading compact-heading"><div><p class="eyebrow">ACTIVITY</p><h1>交易记录</h1><p>按交易所和品种查看影子策略的完整事件。</p></div></section>
+<section class="toolbar panel">
+  <label>交易所<select id="trade-venue"><option value="">全部</option><option value="GATE_LIVE_PUBLIC">Gate</option><option value="BINANCE_LIVE_PUBLIC">币安</option></select></label>
+  <label>品种<select id="trade-symbol"><option value="">全部</option><option value="ETH_USDT">ETH / USDT</option><option value="BTC_USDT">BTC / USDT</option></select></label>
+  <button class="secondary-button" id="trade-refresh">刷新</button>
+</section>
+<section class="panel table-panel">
+  <div class="panel-heading"><div><h2>影子交易流水</h2><p>事件原因和权益变化可展开查看</p></div><span id="trade-count" class="soft-pill">0 条</span></div>
+  <div class="responsive-table"><table><thead><tr><th>时间</th><th>交易所</th><th>品种</th><th>周期</th><th>事件</th><th>结果</th></tr></thead><tbody id="trade-body"><tr><td colspan="6" class="empty-cell">暂无交易事件</td></tr></tbody></table></div>
+</section>
+{% endblock %}

@@ -7,8 +7,16 @@ import pandas as pd
 import pytest
 
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
+    FIXED_STOP_DISTANCE,
     INTERVAL_PRIORITY,
+    _bands_are_opening,
+    _block_symbol_after_stop,
+    _micro_zones_allow_entry,
     _middle_reduction_trigger,
+    _new_state,
+    _parameters_for_symbol,
+    _refresh_box_qualification,
+    _try_release_symbol_after_wait,
     run_multi_timeframe_paper_cycle,
 )
 from gold_crypto_quant.strategy.bollinger_range import (
@@ -23,6 +31,114 @@ LAST_OPEN = {
     "30m": "2026-01-01 11:30",
     "1h": "2026-01-01 11:00",
 }
+
+
+def test_symbol_specific_stop_distances_follow_trading_rules() -> None:
+    bars = pd.DataFrame(
+        {"close": [80_000.0] * 30},
+        index=pd.date_range("2026-01-01", periods=30, freq="5min", tz="UTC"),
+    )
+    for symbol, intervals in FIXED_STOP_DISTANCE.items():
+        for interval, expected in intervals.items():
+            assert _parameters_for_symbol(symbol, interval, bars).fixed_stop_distance == expected
+
+
+def test_micro_filter_requires_lower_confluence_for_long_entries() -> None:
+    assert _micro_zones_allow_entry("ETH_USDT", "LONG", 0.1, -0.2)[0] is True
+    assert _micro_zones_allow_entry("ETH_USDT", "LONG", 0.1, 0.5)[0] is False
+
+
+def test_micro_filter_blocks_eth_short_when_both_periods_are_above_upper_band() -> None:
+    assert _micro_zones_allow_entry("ETH_USDT", "SHORT", 1.1, 1.2)[0] is False
+    assert _micro_zones_allow_entry("ETH_USDT", "SHORT", 1.1, 0.9)[0] is True
+    assert _micro_zones_allow_entry("BTC_USDT", "SHORT", 1.1, 1.2)[0] is True
+
+
+def test_micro_filter_rejects_middle_zone_for_short_entries() -> None:
+    assert _micro_zones_allow_entry("BTC_USDT", "SHORT", 0.6, 1.1)[0] is False
+
+
+def test_invalid_latest_box_cannot_reuse_stale_qualification() -> None:
+    state = _new_state(10_000.0, ("ETH_USDT",))
+    state.box_active["ETH_USDT"]["15m"] = True
+
+    _refresh_box_qualification(
+        state,
+        "ETH_USDT",
+        "15m",
+        box_candidate=False,
+        breakout=False,
+    )
+
+    assert state.box_active["ETH_USDT"]["15m"] is False
+
+
+def test_stop_blocks_whole_symbol_until_a_complete_new_box() -> None:
+    state = _new_state(10_000.0, ("ETH_USDT",))
+    for interval in INTERVAL_PRIORITY:
+        state.box_active["ETH_USDT"][interval] = True
+    stop_time = pd.Timestamp("2026-01-01 12:00", tz="UTC")
+
+    _block_symbol_after_stop(state, "ETH_USDT", "15m", stop_time)
+
+    assert state.symbol_blocked_after_stop["ETH_USDT"] is True
+    assert all(state.blocked_after_stop["ETH_USDT"].values())
+    assert not any(state.box_active["ETH_USDT"].values())
+    assert state.symbol_stopped_interval["ETH_USDT"] == "15m"
+    assert pd.Timestamp(state.symbol_resume_check_after["ETH_USDT"]) == stop_time + pd.Timedelta(
+        minutes=30
+    )
+
+
+def test_wait_uses_closed_bar_and_keeps_waiting_while_bands_open() -> None:
+    state = _new_state(10_000.0, ("ETH_USDT",))
+    stop_time = pd.Timestamp("2026-01-01 12:00", tz="UTC")
+    _block_symbol_after_stop(state, "ETH_USDT", "15m", stop_time)
+    index = pd.date_range(stop_time, periods=3, freq="15min")
+    opening = pd.DataFrame(
+        {
+            "bb_upper": [110.0, 111.0, 112.0],
+            "bb_lower": [90.0, 89.0, 88.0],
+            "bb_width": [20.0, 22.0, 24.0],
+            "box_candidate": [True, True, True],
+            "breakout": [False, False, False],
+        },
+        index=index,
+    )
+    contexts = {"ETH_USDT": {"15m": opening}}
+    batch = [("ETH_USDT", "15m", 2)]
+
+    assert _bands_are_opening(opening, 2) is True
+    assert (
+        _try_release_symbol_after_wait(
+            state,
+            "ETH_USDT",
+            stop_time + pd.Timedelta(minutes=30),
+            batch,
+            contexts,
+        )
+        is False
+    )
+    assert state.symbol_blocked_after_stop["ETH_USDT"] is True
+
+    flat = opening.copy()
+    flat.loc[index[-1], ["bb_upper", "bb_lower", "bb_width"]] = [111.0, 89.0, 22.0]
+    contexts["ETH_USDT"]["15m"] = flat
+
+    assert (
+        _try_release_symbol_after_wait(
+            state,
+            "ETH_USDT",
+            stop_time + pd.Timedelta(minutes=30),
+            batch,
+            contexts,
+        )
+        is True
+    )
+
+    assert state.symbol_blocked_after_stop["ETH_USDT"] is False
+    assert state.box_active["ETH_USDT"]["15m"] is True
+    assert not any(state.blocked_after_stop["ETH_USDT"].values())
 
 
 def test_wide_rotation_reduces_two_points_before_middle() -> None:
@@ -61,7 +177,7 @@ def test_non_eth_waits_for_middle_below_projected_100_percent_profit() -> None:
 
 
 def _bars_by_interval() -> dict[str, pd.DataFrame]:
-    """构造四个周期最后一根都在12:00完成的稳定宽箱体。"""
+    """构造三个交易周期最后一根都在12:00完成的稳定宽箱体。"""
     result: dict[str, pd.DataFrame] = {}
     for interval in INTERVAL_PRIORITY:
         index = pd.date_range(
@@ -93,6 +209,15 @@ def _initialize(bars_by_interval: dict[str, pd.DataFrame], state_path: Path) -> 
     )
 
 
+def _invalidate_sideways_before_last_bar(bars: pd.DataFrame) -> None:
+    """让上一根附近的三轨明显移动，供周期优先级降级测试使用。"""
+    for offset, close in zip((-4, -3, -2), (100.0, 106.0, 112.0), strict=True):
+        bars.iloc[offset, bars.columns.get_loc("open")] = close
+        bars.iloc[offset, bars.columns.get_loc("close")] = close
+        bars.iloc[offset, bars.columns.get_loc("high")] = close + 1.0
+        bars.iloc[offset, bars.columns.get_loc("low")] = close - 1.0
+
+
 def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
     bars_by_interval = _bars_by_interval()
     state_path = tmp_path / "multi.json"
@@ -109,30 +234,90 @@ def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
     assert sum("模拟开仓" in event.title for event in summary.events) == 1
 
 
-def test_multi_timeframe_falls_back_to_15m_when_5m_is_not_sideways(tmp_path) -> None:
+def test_multi_timeframe_falls_back_to_30m_when_15m_is_not_sideways(tmp_path) -> None:
     bars_by_interval = _bars_by_interval()
     state_path = tmp_path / "multi.json"
-    # 让5m在触发前连续单边变化，上一根不再是有效震荡箱体。
-    bars_5m = bars_by_interval["5m"]
-    for offset, close in zip((-4, -3, -2), (100.0, 106.0, 112.0), strict=True):
-        bars_5m.iloc[offset, bars_5m.columns.get_loc("open")] = close
-        bars_5m.iloc[offset, bars_5m.columns.get_loc("close")] = close
-        bars_5m.iloc[offset, bars_5m.columns.get_loc("high")] = close + 1.0
-        bars_5m.iloc[offset, bars_5m.columns.get_loc("low")] = close - 1.0
+    # 让5m和15m都失去震荡资格，才允许按优先级降级到30m。
+    _invalidate_sideways_before_last_bar(bars_by_interval["5m"])
+    _invalidate_sideways_before_last_bar(bars_by_interval["15m"])
     _initialize(bars_by_interval, state_path)
     context_15m = build_rotation_box_context(
-        bars_by_interval["15m"], parameters_for_same_timeframe("15m")
+        bars_by_interval["30m"], parameters_for_same_timeframe("30m")
     )
-    bars_by_interval["15m"].iloc[-1, bars_by_interval["15m"].columns.get_loc("high")] = (
+    bars_by_interval["30m"].iloc[-1, bars_by_interval["30m"].columns.get_loc("high")] = (
         float(context_15m.iloc[-2]["bb_upper"]) + 0.5
     )
 
-    # 5m没有震荡资格时，应向下选择15m，仍只建立一笔空仓。
+    # 15m没有震荡资格时，应向下选择30m，仍只建立一笔空仓。
     summary = run_multi_timeframe_paper_cycle(bars_by_interval, state_path=state_path)
 
     assert summary.position_side == "SHORT"
-    assert summary.active_interval == "15m"
+    assert summary.active_interval == "30m"
     assert sum("模拟开仓" in event.title for event in summary.events) == 1
+
+
+def test_confirmed_box_opens_on_new_one_minute_touch_without_waiting_main_close(
+    tmp_path,
+) -> None:
+    """15分钟没有新增收线时，新增1分钟K线触轨也必须立即产生开仓。"""
+    bars_by_interval = _bars_by_interval()
+    state_path = tmp_path / "intrabar-touch.json"
+    micro_index = pd.date_range(
+        end=pd.Timestamp("2026-01-01 12:01", tz="UTC"),
+        periods=66,
+        freq="1min",
+    )
+    micro = pd.DataFrame(
+        {
+            "open": [100.0] * 66,
+            "high": [100.5] * 66,
+            "low": [99.5] * 66,
+            "close": [100.0] * 66,
+            "volume": [10.0] * 66,
+            "quote_volume": [1000.0] * 66,
+        },
+        index=micro_index,
+    )
+    # 首次调用只初始化到12:00，禁止历史触轨回放。
+    run_multi_timeframe_paper_cycle(
+        bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro.iloc[:-1]},
+        state_path=state_path,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["box_active"]["ETH_USDT"]["15m"] = True
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    context = build_rotation_box_context(
+        bars_by_interval["15m"],
+        parameters_for_same_timeframe("15m"),
+    )
+    lower = float(context.iloc[-1]["bb_lower"])
+    micro.iloc[-1, micro.columns.get_loc("low")] = lower - 0.1
+    micro.iloc[-1, micro.columns.get_loc("open")] = lower + 0.2
+    micro.iloc[-1, micro.columns.get_loc("close")] = lower + 0.2
+    micro.iloc[-1, micro.columns.get_loc("high")] = lower + 0.4
+    summary = run_multi_timeframe_paper_cycle(
+        bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro},
+        state_path=state_path,
+    )
+
+    assert summary.processed_bars == 0
+    assert summary.position_side == "LONG"
+    assert summary.active_interval == "15m"
+    open_events = [event for event in summary.events if "模拟开仓" in event.title]
+    assert len(open_events) == 1
+    assert open_events[0].event_key.startswith("rotation-v5:2026-01-01T12:01:00+00:00")
+    assert any("触及下轨即时开仓" in line for line in open_events[0].lines)
+
+    # 同一份1分钟行情再次轮询时，游标必须阻止重复开仓和重复邮件。
+    repeated = run_multi_timeframe_paper_cycle(
+        bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro},
+        state_path=state_path,
+    )
+    assert not repeated.events
 
 
 def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
@@ -140,6 +325,8 @@ def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
 ) -> None:
     btc = _bars_by_interval()
     eth = {interval: bars.copy() for interval, bars in _bars_by_interval().items()}
+    _invalidate_sideways_before_last_bar(btc["5m"])
+    _invalidate_sideways_before_last_bar(eth["5m"])
     bars_by_symbol = {"BTC_USDT": btc, "ETH_USDT": eth}
     state_path = tmp_path / "multi-symbol.json"
     run_multi_timeframe_paper_cycle(
@@ -150,8 +337,10 @@ def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
         state_path=state_path,
     )
     for symbol_bars in bars_by_symbol.values():
-        context = build_rotation_box_context(symbol_bars["5m"], parameters_for_same_timeframe("5m"))
-        symbol_bars["5m"].iloc[-1, symbol_bars["5m"].columns.get_loc("high")] = (
+        context = build_rotation_box_context(
+            symbol_bars["15m"], parameters_for_same_timeframe("15m")
+        )
+        symbol_bars["15m"].iloc[-1, symbol_bars["15m"].columns.get_loc("high")] = (
             float(context.iloc[-2]["bb_upper"]) + 0.5
         )
 
@@ -163,7 +352,7 @@ def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
 
     assert summary.position_side == "MULTIPLE"
     assert summary.active_symbol == "BTC_USDT,ETH_USDT"
-    assert summary.active_interval == "5m,5m"
+    assert summary.active_interval == "15m,15m"
     assert sum("模拟开仓" in event.title for event in summary.events) == 2
     event_lines = [line for event in summary.events for line in event.lines]
     assert "品种：BTC_USDT" in event_lines
@@ -175,6 +364,7 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
 ) -> None:
     btc = _bars_by_interval()
     eth = {interval: bars.copy() for interval, bars in _bars_by_interval().items()}
+    _invalidate_sideways_before_last_bar(eth["5m"])
     bars_by_symbol = {"BTC_USDT": btc, "ETH_USDT": eth}
     state_path = tmp_path / "single-batch.json"
     run_multi_timeframe_paper_cycle(
@@ -203,8 +393,8 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
     btc["15m"].iloc[-1, btc["15m"].columns.get_loc("high")] = (
         float(btc_context.iloc[-2]["bb_upper"]) + 0.5
     )
-    eth_context = build_rotation_box_context(eth["5m"], parameters_for_same_timeframe("5m"))
-    eth["5m"].iloc[-1, eth["5m"].columns.get_loc("high")] = (
+    eth_context = build_rotation_box_context(eth["15m"], parameters_for_same_timeframe("15m"))
+    eth["15m"].iloc[-1, eth["15m"].columns.get_loc("high")] = (
         float(eth_context.iloc[-2]["bb_upper"]) + 0.5
     )
 

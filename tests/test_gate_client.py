@@ -112,6 +112,11 @@ def test_candlesticks_are_normalized_and_sorted(client: GateTestnetClient) -> No
     assert bars.iloc[-1]["close"] == Decimal("12")
 
 
+def test_one_minute_candlesticks_are_supported(client: GateTestnetClient) -> None:
+    bars = client.get_candlesticks("ETH_USDT", "1m", limit=2)
+    assert len(bars) == 2
+
+
 def test_candlestick_range_uses_from_and_to_without_limit() -> None:
     """范围查询必须遵守Gate的from/to与limit互斥规则。"""
     captured_requests: list[httpx.Request] = []

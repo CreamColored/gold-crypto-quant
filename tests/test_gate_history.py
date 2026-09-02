@@ -54,3 +54,26 @@ def test_naive_now_is_rejected() -> None:
             interval="5m",
             now=datetime(2026, 8, 18, 10, 0),
         )
+
+
+def test_one_minute_closed_bar_is_stored() -> None:
+    index = pd.DatetimeIndex(["2026-08-18T10:00:00Z"], name="open_time")
+    frame = pd.DataFrame(
+        {
+            "open": [Decimal("100")],
+            "high": [Decimal("101")],
+            "low": [Decimal("99")],
+            "close": [Decimal("100")],
+            "volume": [Decimal("10")],
+            "quote_volume": [Decimal("1000")],
+        },
+        index=index,
+    )
+    rows, skipped = _build_bar_rows(
+        frame,
+        instrument_id=7,
+        interval="1m",
+        now=datetime(2026, 8, 18, 10, 1, tzinfo=UTC),
+    )
+    assert len(rows) == 1
+    assert skipped == 0

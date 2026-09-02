@@ -1,5 +1,6 @@
 """按交易和异常事件即时发送SMTP邮件，并在单次服务运行中去重。"""
 
+import os
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -35,6 +36,8 @@ class RuntimeEventNotifier:
         severity: str = "INFO",
         now: datetime | None = None,
         repeatable: bool = False,
+        venue: str | None = None,
+        comparison_status_lines: tuple[str, ...] | None = None,
     ) -> bool:
         """发送并审计一封事件邮件；相同非重复事件在本进程中只发送一次。"""
         if not self.enabled:
@@ -47,6 +50,10 @@ class RuntimeEventNotifier:
             event_title=event_title,
             event_lines=event_lines,
             severity=severity,
+            **({"venue": venue} if venue is not None else {}),
+            comparison_status_lines=comparison_status_lines,
+            # 事件由哪个服务发出，就展示哪个进程的资源占用，避免沿用旧服务PID。
+            process_id_override=os.getpid() if comparison_status_lines is not None else None,
         )
         status = "SENT"
         error_message: str | None = None

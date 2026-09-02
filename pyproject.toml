@@ -9,13 +9,18 @@ description = "Paper-trading research system for crypto futures and XAU/USD."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastapi>=0.116,<1",
     "httpx>=0.28,<1",
+    "itsdangerous>=2.2,<3",
+    "jinja2>=3.1,<4",
     "numpy>=2.3,<3",
     "pandas>=2.3,<4",
     "pydantic-settings>=2.14,<3",
     "pymysql[rsa]>=1.2,<2",
     "psutil>=7.2,<8",
     "sqlalchemy>=2.0,<3",
+    "python-multipart>=0.0.20,<1",
+    "uvicorn[standard]>=0.35,<1",
     "vectorbt>=1.1,<2",
 ]
 
@@ -38,3 +43,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/gold_crypto_quant/web/app.py" = ["B008"]

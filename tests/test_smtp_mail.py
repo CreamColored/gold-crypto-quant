@@ -147,6 +147,7 @@ def test_system_status_uses_project_data_volume(monkeypatch, tmp_path) -> None:
 
 
 def test_event_email_contains_trade_and_safety_context(monkeypatch) -> None:
+    captured_chart: dict[str, object] = {}
     monkeypatch.setattr(
         "gold_crypto_quant.notifications.smtp_mail.read_service_state",
         lambda _name: SimpleNamespace(process_id=None),
@@ -168,7 +169,7 @@ def test_event_email_contains_trade_and_safety_context(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "gold_crypto_quant.notifications.smtp_mail._build_market_chart_png",
-        lambda **_kwargs: b"fake-png",
+        lambda **kwargs: captured_chart.update(kwargs) or b"fake-png",
     )
 
     # 调用事件模板，确认买卖信息和实盘硬关闭状态同时出现在邮件中。
@@ -176,11 +177,21 @@ def test_event_email_contains_trade_and_safety_context(monkeypatch) -> None:
         datetime(2026, 8, 31, tzinfo=UTC),
         event_title="ETH_USDT 模拟买入开仓成交",
         event_lines=("成交价格：2500",),
+        venue="BINANCE_LIVE_PUBLIC",
+        comparison_status_lines=(
+            "Gate影子账户：权益 10001.00U",
+            "币安影子账户：权益 9999.00U",
+            "真实交易：False",
+            "交易所订单提交：False",
+        ),
+        process_id_override=123,
     )
 
     assert "模拟买入" in message.subject
     assert "成交价格：2500" in message.body
     assert "交易所订单提交：False" in message.body
+    assert "Gate影子账户：权益 10001.00U" in message.body
+    assert captured_chart["venue"] == "BINANCE_LIVE_PUBLIC"
     assert message.html_body is not None
     assert "cid:market-chart" in message.html_body
     assert len(message.inline_images) == 1

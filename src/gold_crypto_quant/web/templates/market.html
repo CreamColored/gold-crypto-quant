@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}实时行情 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading compact-heading">
+  <div><p class="eyebrow">MARKET</p><h1>实时行情</h1><p>查看各交易所独立K线、布林带与震荡状态。</p></div>
+</section>
+<section class="toolbar panel">
+  <label>交易所<select id="market-venue"><option value="GATE_LIVE_PUBLIC">Gate</option><option value="BINANCE_LIVE_PUBLIC">币安</option></select></label>
+  <label>品种<select id="market-symbol"><option value="ETH_USDT">ETH / USDT</option><option value="BTC_USDT">BTC / USDT</option></select></label>
+  <label>周期<select id="market-interval"><option value="5m">5分钟</option><option value="15m" selected>15分钟</option><option value="30m">30分钟</option><option value="1h">1小时</option><option value="1m">1分钟</option></select></label>
+  <button class="secondary-button" id="market-refresh">刷新</button>
+</section>
+<section class="market-layout">
+  <article class="panel chart-panel market-chart-panel">
+    <div class="panel-heading"><div><h2 id="market-title">ETH/USDT · Gate</h2><p id="market-subtitle">15分钟 · 已收盘K线</p></div><span id="market-price" class="price-badge">—</span></div>
+    <div id="market-chart" class="chart market"><div class="chart-placeholder">正在载入K线…</div></div>
+  </article>
+  <aside class="panel decision-panel">
+    <div class="panel-heading"><div><h2>策略观察</h2><p>只读判断，不提供操作按钮</p></div></div>
+    <dl id="market-decision" class="decision-list">
+      <div><dt>震荡判断</dt><dd>—</dd></div><div><dt>价格位置</dt><dd>—</dd></div><div><dt>上轨</dt><dd>—</dd></div><div><dt>中轨</dt><dd>—</dd></div><div><dt>下轨</dt><dd>—</dd></div>
+    </dl>
+    <div class="safety-banner"><span>只读</span><p>该页面不会向 Gate 或币安发送任何订单。</p></div>
+  </aside>
+</section>
+{% endblock %}

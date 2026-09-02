@@ -1,6 +1,7 @@
 """15分钟布林带轨道轮转的本地影子模拟周期。"""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.runtime.bollinger_rotation_simulator import RotationPaperEvent
@@ -29,12 +30,14 @@ def run_bollinger_signal_cycle(
     symbols: tuple[str, ...] = ("BTC_USDT", "ETH_USDT"),
     bar_limit_5m: int = 500,
     bar_limit_15m: int = 300,
+    venue: str = GATE_TESTNET_VENUE,
+    state_path: Path | None = None,
 ) -> BollingerSignalCycleSummary:
     """按周期优先级运行BTC/ETH共享资金、全局单持仓影子账户。"""
     health_by_stream = {
-        (symbol, interval): refresh_market_health(symbol, interval, venue=GATE_TESTNET_VENUE)
+        (symbol, interval): refresh_market_health(symbol, interval, venue=venue)
         for symbol in symbols
-        for interval in ("5m", "15m", "30m", "1h")
+        for interval in ("1m", "5m", "15m", "30m", "1h")
     }
     unhealthy = [
         f"{symbol} {interval}：{health.reason}"
@@ -50,25 +53,41 @@ def run_bollinger_signal_cycle(
         )
     bars_by_symbol = {
         symbol: {
+            # 5分钟是最高优先级震荡周期；确认走平后由1分钟行情负责触轨即时开仓。
             "5m": load_market_bars(
                 symbol,
                 "5m",
                 limit=max(500, bar_limit_5m),
-                venue=GATE_TESTNET_VENUE,
+                venue=venue,
             ),
             "15m": load_market_bars(
                 symbol,
                 "15m",
                 limit=max(300, bar_limit_15m),
-                venue=GATE_TESTNET_VENUE,
+                venue=venue,
             ),
-            "30m": load_market_bars(symbol, "30m", limit=300, venue=GATE_TESTNET_VENUE),
-            "1h": load_market_bars(symbol, "1h", limit=300, venue=GATE_TESTNET_VENUE),
+            "30m": load_market_bars(symbol, "30m", limit=300, venue=venue),
+            "1h": load_market_bars(symbol, "1h", limit=300, venue=venue),
         }
         for symbol in symbols
     }
-    # 调用多品种状态机；BTC/ETH与四个周期共享账户，全系统最多一笔仓位。
-    paper = run_multi_timeframe_paper_cycle(bars_by_symbol)
+    # 1分钟只供开仓过滤；状态机内部按UTC自然边界聚合3分钟，不加入交易周期优先级。
+    micro_bars_by_symbol = {
+        symbol: load_market_bars(
+            symbol,
+            "1m",
+            limit=max(500, bar_limit_5m),
+            venue=venue,
+        )
+        for symbol in symbols
+    }
+    # 调用多品种状态机；BTC/ETH与四个交易周期共享账户，1m/3m只负责过滤开仓。
+    paper_kwargs = {"state_path": state_path} if state_path is not None else {}
+    paper = run_multi_timeframe_paper_cycle(
+        bars_by_symbol,
+        micro_bars_by_symbol=micro_bars_by_symbol,
+        **paper_kwargs,
+    )
     entry_count = sum("模拟开仓" in item.title for item in paper.events)
     active_status = (
         f"{paper.active_symbol} {paper.active_interval}"
