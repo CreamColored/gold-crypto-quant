@@ -204,11 +204,66 @@ def _bars_by_interval() -> dict[str, pd.DataFrame]:
     return result
 
 
-def _initialize(bars_by_interval: dict[str, pd.DataFrame], state_path: Path) -> None:
-    """调用前40根初始化四周期游标，不生成历史成交。"""
+MICRO_END = "2026-01-01 12:01"
+
+
+def _micro_bars(price: float = 100.0, periods: int = 70) -> pd.DataFrame:
+    """构造平坦的1分钟K线；最后一根留给测试改写成触轨。"""
+    index = pd.date_range(end=pd.Timestamp(MICRO_END, tz="UTC"), periods=periods, freq="1min")
+    return pd.DataFrame(
+        {
+            "open": [price] * periods,
+            "high": [price + 0.5] * periods,
+            "low": [price - 0.5] * periods,
+            "close": [price] * periods,
+            "volume": [10.0] * periods,
+            "quote_volume": [1000.0] * periods,
+        },
+        index=index,
+    )
+
+
+def _touch_band(micro: pd.DataFrame, level: float, *, upper: bool) -> None:
+    """把最后一根1分钟K线改写成刚好触及指定轨道，另一侧保持不触及。"""
+    row = len(micro) - 1
+    if upper:
+        micro.iloc[row, micro.columns.get_loc("high")] = level + 0.4
+        micro.iloc[row, micro.columns.get_loc("low")] = level - 0.2
+        micro.iloc[row, micro.columns.get_loc("open")] = level - 0.1
+        micro.iloc[row, micro.columns.get_loc("close")] = level - 0.1
+    else:
+        micro.iloc[row, micro.columns.get_loc("low")] = level - 0.4
+        micro.iloc[row, micro.columns.get_loc("high")] = level + 0.2
+        micro.iloc[row, micro.columns.get_loc("open")] = level + 0.1
+        micro.iloc[row, micro.columns.get_loc("close")] = level + 0.1
+
+
+def _activate_boxes(state_path: Path, symbols: tuple[str, ...], intervals: tuple[str, ...]) -> None:
+    """直接置位箱体资格，跳过多轮收线确认，让测试聚焦在触轨行为本身。"""
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for symbol in symbols:
+        for interval in intervals:
+            state["box_active"][symbol][interval] = True
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _initialize(
+    bars_by_interval: dict[str, pd.DataFrame],
+    state_path: Path,
+    micro: pd.DataFrame | None = None,
+    symbols: tuple[str, ...] = ("ETH_USDT",),
+) -> None:
+    """建立四周期与逐分钟游标，不生成历史成交。
+
+    传入1分钟行情时用去掉最后一根的切片，让测试改写的那根成为“新增”K线触发触轨。
+    """
+    kwargs = {}
+    if micro is not None:
+        kwargs["micro_bars_by_symbol"] = dict.fromkeys(symbols, micro.iloc[:-1])
     run_multi_timeframe_paper_cycle(
         {interval: bars.iloc[:40] for interval, bars in bars_by_interval.items()},
         state_path=state_path,
+        **kwargs,
     )
 
 
@@ -223,14 +278,21 @@ def _invalidate_sideways_before_last_bar(bars: pd.DataFrame) -> None:
 
 def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
     bars_by_interval = _bars_by_interval()
+    micro = _micro_bars()
     state_path = tmp_path / "multi.json"
-    _initialize(bars_by_interval, state_path)
-    for interval, bars in bars_by_interval.items():
-        context = build_rotation_box_context(bars, parameters_for_same_timeframe(interval))
-        bars.iloc[-1, bars.columns.get_loc("high")] = float(context.iloc[-2]["bb_upper"]) + 0.5
+    _initialize(bars_by_interval, state_path, micro)
+    _activate_boxes(state_path, ("ETH_USDT",), INTERVAL_PRIORITY)
+    context = build_rotation_box_context(
+        bars_by_interval["5m"], parameters_for_same_timeframe("5m")
+    )
+    _touch_band(micro, float(context.iloc[-1]["bb_upper"]), upper=True)
 
     # 四个周期同一时刻都有箱体且触上轨时，只允许最高优先级5m开空。
-    summary = run_multi_timeframe_paper_cycle(bars_by_interval, state_path=state_path)
+    summary = run_multi_timeframe_paper_cycle(
+        bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro},
+        state_path=state_path,
+    )
 
     assert summary.position_side == "SHORT"
     assert summary.active_interval == "5m"
@@ -243,16 +305,21 @@ def test_multi_timeframe_falls_back_to_30m_when_15m_is_not_sideways(tmp_path) ->
     # 让5m和15m都失去震荡资格，才允许按优先级降级到30m。
     _invalidate_sideways_before_last_bar(bars_by_interval["5m"])
     _invalidate_sideways_before_last_bar(bars_by_interval["15m"])
-    _initialize(bars_by_interval, state_path)
-    context_15m = build_rotation_box_context(
+    micro = _micro_bars()
+    _initialize(bars_by_interval, state_path, micro)
+    # 只放行30m与1h的箱体资格，模拟5m/15m已失去震荡。
+    _activate_boxes(state_path, ("ETH_USDT",), ("30m", "1h"))
+    context_30m = build_rotation_box_context(
         bars_by_interval["30m"], parameters_for_same_timeframe("30m")
     )
-    bars_by_interval["30m"].iloc[-1, bars_by_interval["30m"].columns.get_loc("high")] = (
-        float(context_15m.iloc[-2]["bb_upper"]) + 0.5
-    )
+    _touch_band(micro, float(context_30m.iloc[-1]["bb_upper"]), upper=True)
 
     # 15m没有震荡资格时，应向下选择30m，仍只建立一笔空仓。
-    summary = run_multi_timeframe_paper_cycle(bars_by_interval, state_path=state_path)
+    summary = run_multi_timeframe_paper_cycle(
+        bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro},
+        state_path=state_path,
+    )
 
     assert summary.position_side == "SHORT"
     assert summary.active_interval == "30m"
@@ -331,25 +398,28 @@ def test_multi_symbol_uses_one_account_and_allows_btc_eth_together(
     _invalidate_sideways_before_last_bar(btc["5m"])
     _invalidate_sideways_before_last_bar(eth["5m"])
     bars_by_symbol = {"BTC_USDT": btc, "ETH_USDT": eth}
+    micro = {"BTC_USDT": _micro_bars(), "ETH_USDT": _micro_bars()}
     state_path = tmp_path / "multi-symbol.json"
     run_multi_timeframe_paper_cycle(
         {
             symbol: {interval: bars.iloc[:40] for interval, bars in symbol_bars.items()}
             for symbol, symbol_bars in bars_by_symbol.items()
         },
+        micro_bars_by_symbol={symbol: bars.iloc[:-1] for symbol, bars in micro.items()},
         state_path=state_path,
     )
-    for symbol_bars in bars_by_symbol.values():
+    # 5m已被打散，只放行15m及以上，让两个品种都落在15m开仓。
+    _activate_boxes(state_path, ("BTC_USDT", "ETH_USDT"), ("15m", "30m", "1h"))
+    for symbol, symbol_bars in bars_by_symbol.items():
         context = build_rotation_box_context(
             symbol_bars["15m"], parameters_for_same_timeframe("15m")
         )
-        symbol_bars["15m"].iloc[-1, symbol_bars["15m"].columns.get_loc("high")] = (
-            float(context.iloc[-2]["bb_upper"]) + 0.5
-        )
+        _touch_band(micro[symbol], float(context.iloc[-1]["bb_upper"]), upper=True)
 
     # BTC和ETH同周期同时触轨时各开一笔，但仍共享同一份账户权益。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
+        micro_bars_by_symbol=micro,
         state_path=state_path,
     )
 
@@ -391,12 +461,14 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
     eth = {interval: bars.copy() for interval, bars in _bars_by_interval().items()}
     _invalidate_sideways_before_last_bar(eth["5m"])
     bars_by_symbol = {"BTC_USDT": btc, "ETH_USDT": eth}
+    micro = {"BTC_USDT": _micro_bars(), "ETH_USDT": _micro_bars()}
     state_path = tmp_path / "single-batch.json"
     run_multi_timeframe_paper_cycle(
         {
             symbol: {interval: bars.iloc[:40] for interval, bars in symbol_bars.items()}
             for symbol, symbol_bars in bars_by_symbol.items()
         },
+        micro_bars_by_symbol={symbol: bars.iloc[:-1] for symbol, bars in micro.items()},
         state_path=state_path,
     )
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -412,20 +484,19 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
             "trade_net_pnl": 0.0,
         }
     )
+    for symbol in ("BTC_USDT", "ETH_USDT"):
+        for interval in ("15m", "30m", "1h"):
+            state["box_active"][symbol][interval] = True
     state_path.write_text(json.dumps(state), encoding="utf-8")
-    btc["30m"].iloc[-1, btc["30m"].columns.get_loc("high")] = 106.0
-    btc_context = build_rotation_box_context(btc["15m"], parameters_for_same_timeframe("15m"))
-    btc["15m"].iloc[-1, btc["15m"].columns.get_loc("high")] = (
-        float(btc_context.iloc[-2]["bb_upper"]) + 0.5
-    )
+    # BTC这一分钟冲上105以上触发持仓止损。
+    _touch_band(micro["BTC_USDT"], 106.0, upper=True)
     eth_context = build_rotation_box_context(eth["15m"], parameters_for_same_timeframe("15m"))
-    eth["15m"].iloc[-1, eth["15m"].columns.get_loc("high")] = (
-        float(eth_context.iloc[-2]["bb_upper"]) + 0.5
-    )
+    _touch_band(micro["ETH_USDT"], float(eth_context.iloc[-1]["bb_upper"]), upper=True)
 
     # BTC 30m止损后不能切到BTC 15m；ETH是独立品种，仍允许正常开仓。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
+        micro_bars_by_symbol=micro,
         state_path=state_path,
     )
 
@@ -439,8 +510,9 @@ def test_stop_does_not_fall_through_to_another_symbol_or_interval_in_same_batch(
 
 def test_target_does_not_reverse_when_current_bar_invalidates_box(tmp_path) -> None:
     bars_by_interval = _bars_by_interval()
+    micro = _micro_bars()
     state_path = tmp_path / "broken-box.json"
-    _initialize(bars_by_interval, state_path)
+    _initialize(bars_by_interval, state_path, micro)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     state["positions"]["ETH_USDT"].update(
         {
@@ -455,15 +527,20 @@ def test_target_does_not_reverse_when_current_bar_invalidates_box(tmp_path) -> N
         }
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    # 大阴线打穿30m箱体：先改写主周期K线，再按改写后重算的轨道设置分钟触及价，
+    # 否则策略运行时算出的下轨与测试使用的不是同一个值。
     bars_30m = bars_by_interval["30m"]
+    first_pass = build_rotation_box_context(bars_30m, parameters_for_same_timeframe("30m"))
+    rough_lower = float(first_pass.iloc[-1]["bb_lower"])
+    bars_30m.iloc[-1, bars_30m.columns.get_loc("low")] = rough_lower - 10.0
+    bars_30m.iloc[-1, bars_30m.columns.get_loc("close")] = rough_lower - 9.0
     context = build_rotation_box_context(bars_30m, parameters_for_same_timeframe("30m"))
-    lower = float(context.iloc[-2]["bb_lower"])
-    bars_30m.iloc[-1, bars_30m.columns.get_loc("low")] = lower - 10.0
-    bars_30m.iloc[-1, bars_30m.columns.get_loc("close")] = lower - 9.0
+    _touch_band(micro, float(context.iloc[-1]["bb_lower"]), upper=False)
 
     # 大阴线已破坏当前箱体时，只完成空单下轨止盈，不允许原地反手做多。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_interval,
+        micro_bars_by_symbol={"ETH_USDT": micro},
         state_path=state_path,
     )
 

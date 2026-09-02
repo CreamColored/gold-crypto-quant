@@ -15,6 +15,10 @@ from gold_crypto_quant.runtime.market_data_runner import (
     OANDA_MARKET_DATA_SERVICE_NAME,
 )
 from gold_crypto_quant.storage.database import build_engine
+from gold_crypto_quant.storage.execution_status import (
+    ACTIVE_STRATEGY_NAME,
+    ACTIVE_STRATEGY_VERSION,
+)
 from gold_crypto_quant.storage.models import (
     Instrument,
     MarketDataHealthState,
@@ -26,10 +30,6 @@ from gold_crypto_quant.storage.models import (
 from gold_crypto_quant.storage.paper_account import (
     OANDA_PAPER_ACCOUNT_VENUE,
     PAPER_ACCOUNT_VENUE,
-)
-from gold_crypto_quant.storage.execution_status import (
-    ACTIVE_STRATEGY_NAME,
-    ACTIVE_STRATEGY_VERSION,
 )
 
 GATE_EXPECTED_MARKET_STREAMS = 8

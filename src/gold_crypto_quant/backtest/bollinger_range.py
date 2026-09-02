@@ -8,12 +8,12 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
+from gold_crypto_quant.risk.qualification import QualificationDecision
 from gold_crypto_quant.strategy.bollinger_range import (
     BollingerRangeParameters,
     build_bollinger_entry_context,
     build_same_timeframe_entry_context,
 )
-from gold_crypto_quant.risk.qualification import QualificationDecision
 
 
 @dataclass(frozen=True, slots=True)
