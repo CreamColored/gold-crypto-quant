@@ -44,7 +44,7 @@ python main.py init-db
 python main.py sync-comments
 
 # 当前日常运行路径（V5.7，Gate+币安双所影子交易与Web监管）
-python main.py public-market-comparison          # 启动双行情影子服务，默认7天
+python main.py public-market-comparison --poll-seconds 20   # 双行情影子服务，默认7天
 python main.py web-init-admin                    # 首次创建Moon超级管理员
 python main.py web-run                           # 启动Moon只读Web，默认127.0.0.1:8765
 python main.py system-readiness
@@ -85,6 +85,11 @@ python main.py paper-simulation-status
 python main.py market-runner --limit 500 --max-cycles 1
 pytest
 ```
+
+`--poll-seconds` 决定新收盘的1分钟K线最迟多久被扫到。库在本地后单轮工作只要约9秒，
+所以取20秒——保证每根1分钟K线收线后20秒内一定被处理，不会跨过整根。日常启动脚本在
+`.runtime/run-public-market-comparison-7d.command`，**该目录在 .gitignore 里、不受版本控制**，
+改参数要直接改那个文件。
 
 数据库连接使用 `mysql+pymysql`，字符集统一为 `utf8mb4`，应用和数据库时间统一使用
 UTC。当前仓库按用户明确决定跟踪 `.env`；该文件含明文密钥，不得公开分享仓库或日志。
@@ -164,18 +169,32 @@ ETH 5m/15m 5点、30m/1h 10点。BTC与ETH可以同时持仓，但同一币种�
 
 ## 数据库连接
 
-`build_engine()` 用 `lru_cache` 做进程内单例，**不要改成每次新建**。几十个存储函数都写成
-`engine or build_engine()`，每新建一个 Engine 就是一个空连接池，下一次查询要重做 TCP 与
-MySQL 认证握手。数据库在公网（100ms 往返）时实测：
+数据库跑在本机 Docker 的 MySQL 8.4，`DATABASE_URL` 指向 `127.0.0.1:3306`。
+**不要用 `localhost`**——MySQL 客户端遇到 `localhost` 会走 Unix socket，而库在容器里，
+socket 不通，必须走 TCP。
 
-| | 每次新建 Engine | 复用缓存 Engine |
+### 为什么不放公网
+
+2026-09-03 把库从公网服务器搬回本机，同样的操作实测：
+
+| | 公网库 | 本地库 |
 |---|---|---|
-| 建连+查询 | 617.6 ms | 103.2 ms |
-| `load_market_bars` ×15 | 13.15 s | 8.69 s |
-| `refresh_market_health` ×15 | 16.11 s | 7.68 s |
+| 往返 | 26.30 ms | 0.36 ms |
+| 取 500 根 K 线 | 537 ms | 3.06 ms |
+| `load_market_bars` ×15 | 8.69 s | 0.11 s |
+| `refresh_market_health` ×15 | 7.68 s | 0.09 s |
+| **双行情对照单轮耗时** | **119 s**（最大 202） | **约 9 s** |
 
-双行情对照一轮要跑两遍上面两组，缓存后每轮省约 26 秒。旧写法还会漏连接——被 GC 的连接池
-不会 `dispose()`，服务端只能中断，`Aborted_clients` 曾累计到三万以上。
+瓶颈是公网那台的**下行带宽只有约 140 KB/s**（上行 1.7 MB/s，不对称）。策略每轮要下载
+约 1,700 KB 的 K 线，光传输就要 12 秒。搬到本地后单轮从 119 秒降到约 9 秒，
+`--poll-seconds` 重新生效——公网时期单轮工作超过 60 秒，循环一直是 `wait(0.1)` 背靠背跑。
+
+### Engine 必须是进程内单例
+
+`build_engine()` 用 `lru_cache` 缓存，**不要改成每次新建**。几十个存储函数都写成
+`engine or build_engine()`，每新建一个 Engine 就是一个空连接池，下一次查询要重做 TCP 与
+MySQL 认证握手；库在公网时单次握手实测 514 毫秒，一轮要付几十次。旧写法还会漏连接——
+被 GC 的连接池不会 `dispose()`，服务端只能中断，`Aborted_clients` 曾累计到三万以上。
 
 配置变更或测试收尾用 `reset_engine()` 释放连接池并清缓存。
 
