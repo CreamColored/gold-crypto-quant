@@ -227,6 +227,17 @@ MySQL 认证握手；库在公网时单次握手实测 514 毫秒，一轮要付
 ## 运维脚本
 
 ```bash
+.venv/bin/python scripts/check_exchange_reachability.py
+```
+
+检查当前网络出口能否同时访问 Gate 与币安的公开行情，切换代理节点后运行可确认该节点是否
+两个交易所都支持。用项目自己的交易所客户端发请求，与双行情服务走完全相同的代码路径和代理
+设置；用 curl 另测可能因为代理规则不同而得出不一致的结果。
+
+2026-09-03 实测：日本（NRT）两个交易所都可用；美国（LAX）Gate 可用但**币安全部返回
+HTTP 451 "restricted location"**——这是币安对美国IP的地域封锁，换另一台美国节点同样无效。
+
+```bash
 .venv/bin/python scripts/backup.py
 ```
 
