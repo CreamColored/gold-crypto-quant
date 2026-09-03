@@ -101,11 +101,9 @@ async function loadOverview() {
   renderEquityChart(data);
 }
 
-// 盘口分两路显示，缺一不可：
-//   直连交易所  —— 亚秒级跳动，看的是市场此刻的真实价格
-//   采集器落库  —— 带数据年龄，采集器停了必须看得出来
-// 只留直连的话页面会从"系统监控"退化成"价格显示器"：采集器挂掉时价格照样跳，
-// 而策略用的正是采集器那条链路，你会完全察觉不到。
+// 价格由浏览器直连交易所的永续 bookTicker 推送。
+// 注意这条链路与策略无关：策略用的是采集器落库的数据，采集器停了这里照常跳动，
+// 页面看不出来。采集器的健康状况需要另找地方观察。
 const QUOTE_WS = {
   GATE_LIVE_PUBLIC: {
     url: () => "wss://fx-ws.gateio.ws/v4/ws/usdt",
@@ -195,23 +193,6 @@ function startQuoteStream(){
   }, 1000);
 }
 
-// 采集器那一路仍然要查：它是策略实际使用的数据源，年龄涨上去就说明采集断了。
-async function loadQuotes(){
-  const venue = $("#market-venue")?.value, symbol = $("#market-symbol")?.value;
-  if(!venue || !symbol) return;
-  const q = await getJSON(`/api/quotes?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}`);
-  const value = $("#quote-collector"), age = $("#quote-age");
-  if(!value || !age) return;
-  if(!q.available){
-    value.textContent = "—";
-    age.textContent = "⚠ 采集器无数据";
-    age.classList.add("stale");
-    return;
-  }
-  value.textContent = money(q.mid, quoteDigits(q.mid));
-  age.textContent = q.stale ? `⚠ 已 ${q.age_seconds} 秒未更新` : `延迟 ${q.age_seconds} 秒 · ${q.frame_count.toLocaleString("zh-CN")} 帧`;
-  age.classList.toggle("stale", q.stale);
-}
 
 let marketChart;
 async function loadMarket() {
@@ -258,19 +239,14 @@ document.addEventListener("DOMContentLoaded",()=>{
   if(page==="market"){
     // 盘口每秒变、K线要30秒才变一次：统一2秒一轮，K线每15轮才重新拉，
     // 既让价格跳动可见，又不会每2秒重算一遍布林带。
-    let tick = 0;
-    startPolling(async()=>{
-      const jobs = [loadQuotes()];
-      if(tick % 15 === 0) jobs.push(loadMarket());
-      tick += 1;
-      await Promise.all(jobs);
-    },2000);
+    // 价格由浏览器直连交易所推送，轮询只负责K线与布林带——那要到主周期收线才变。
+    startPolling(loadMarket,30000);
     startQuoteStream();
-    const reloadBoth = manual(async()=>{ tick = 0; await Promise.all([loadMarket(),loadQuotes()]); });
-    $("#market-refresh").addEventListener("click",reloadBoth);
-    $("#market-interval").addEventListener("change",reloadBoth);
+    const reloadChart = manual(loadMarket);
+    $("#market-refresh").addEventListener("click",reloadChart);
+    $("#market-interval").addEventListener("change",reloadChart);
     // 换交易所或品种要重连直连通道，否则会一直显示上一个品种的价格。
-    ["#market-venue","#market-symbol"].forEach(s=>$(s).addEventListener("change",()=>{ startQuoteStream(); reloadBoth(); }));
+    ["#market-venue","#market-symbol"].forEach(s=>$(s).addEventListener("change",()=>{ startQuoteStream(); reloadChart(); }));
     window.addEventListener("beforeunload", stopQuoteStream);
   }
   if(page==="trades"){
