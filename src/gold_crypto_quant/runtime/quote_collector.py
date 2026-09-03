@@ -50,10 +50,14 @@ class QuoteBucket:
     ask_low: float
     ask_high: float
     frame_count: int
+    # 桶内最后一帧的原始买卖对。极值来自秒内不同瞬间，拼在一起会得到
+    # 买一高于卖一的交叉盘口——展示当前价必须用同一帧的快照。
+    bid_close: float = 0.0
+    ask_close: float = 0.0
 
     @classmethod
     def start(cls, bid: float, ask: float) -> "QuoteBucket":
-        return cls(bid, bid, ask, ask, 1)
+        return cls(bid, bid, ask, ask, 1, bid, ask)
 
     def fold(self, bid: float, ask: float) -> None:
         """并入一帧盘口。"""
@@ -61,6 +65,7 @@ class QuoteBucket:
         self.bid_high = max(self.bid_high, bid)
         self.ask_low = min(self.ask_low, ask)
         self.ask_high = max(self.ask_high, ask)
+        self.bid_close, self.ask_close = bid, ask
         self.frame_count += 1
 
     def merge(self, other: "QuoteBucket") -> None:
@@ -69,6 +74,8 @@ class QuoteBucket:
         self.bid_high = max(self.bid_high, other.bid_high)
         self.ask_low = min(self.ask_low, other.ask_low)
         self.ask_high = max(self.ask_high, other.ask_high)
+        # 后来的桶在时间上更靠后，快照取它的。
+        self.bid_close, self.ask_close = other.bid_close, other.ask_close
         self.frame_count += other.frame_count
 
 
@@ -139,6 +146,7 @@ class QuoteCollector:
                 self._minutes[minute_key] = QuoteBucket(
                     bucket.bid_low, bucket.bid_high, bucket.ask_low,
                     bucket.ask_high, bucket.frame_count,
+                    bucket.bid_close, bucket.ask_close,
                 )
                 self._minute_seconds[minute_key] = 1
             else:
@@ -168,6 +176,8 @@ class QuoteCollector:
             "bid_high": statement.inserted.bid_high,
             "ask_low": statement.inserted.ask_low,
             "ask_high": statement.inserted.ask_high,
+            "bid_close": statement.inserted.bid_close,
+            "ask_close": statement.inserted.ask_close,
             "frame_count": statement.inserted.frame_count,
         }
         if table is MarketQuoteMinute:
@@ -185,6 +195,7 @@ class QuoteCollector:
                 "bucket_time": bucket_time,
                 "bid_low": bucket.bid_low, "bid_high": bucket.bid_high,
                 "ask_low": bucket.ask_low, "ask_high": bucket.ask_high,
+                "bid_close": bucket.bid_close, "ask_close": bucket.ask_close,
                 "frame_count": bucket.frame_count,
             }
             for venue, contract, bucket_time, bucket in self.drain_seconds(now)
@@ -195,6 +206,7 @@ class QuoteCollector:
                 "bucket_time": bucket_time,
                 "bid_low": bucket.bid_low, "bid_high": bucket.bid_high,
                 "ask_low": bucket.ask_low, "ask_high": bucket.ask_high,
+                "bid_close": bucket.bid_close, "ask_close": bucket.ask_close,
                 "frame_count": bucket.frame_count, "covered_seconds": covered,
             }
             for venue, contract, bucket_time, bucket, covered in self.drain_minutes(now)

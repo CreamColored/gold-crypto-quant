@@ -108,3 +108,29 @@ def test_record_folds_frames_into_current_second() -> None:
     bucket = next(iter(collector._seconds.values()))
     assert bucket.frame_count == 2
     assert bucket.bid_low == 99.0
+
+
+def test_close_snapshot_tracks_the_last_frame() -> None:
+    """展示当前价必须用同一帧的快照。
+
+    极值来自秒内不同瞬间：拿"该秒最高买价"配"该秒最低卖价"会得到买一高于卖一的
+    交叉盘口——这在真实盘口上不可能出现。
+    """
+    bucket = QuoteBucket.start(100.0, 100.1)
+    bucket.fold(103.0, 103.1)
+    bucket.fold(99.0, 99.1)
+
+    # 极值确实是交叉的：最高买 103.0 > 最低卖 99.1。
+    assert bucket.bid_high > bucket.ask_low
+    # 快照则始终是一致的买卖对。
+    assert (bucket.bid_close, bucket.ask_close) == (99.0, 99.1)
+    assert bucket.ask_close > bucket.bid_close
+
+
+def test_merge_keeps_the_later_snapshot() -> None:
+    """秒桶汇总成分钟时，快照要取时间上更靠后的那个。"""
+    earlier = QuoteBucket.start(100.0, 100.1)
+    later = QuoteBucket.start(102.0, 102.1)
+    earlier.merge(later)
+
+    assert (earlier.bid_close, earlier.ask_close) == (102.0, 102.1)

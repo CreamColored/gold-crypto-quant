@@ -61,3 +61,11 @@ button { cursor: pointer; }
   .app-shell { display:block; }.sidebar { display:none; }.main-content { padding:18px 14px 92px; }.mobile-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:25px; }.brand.compact { padding:0; }.brand.compact .brand-mark { width:34px;height:34px; }.readonly-pill { background:var(--green-soft);color:var(--green); }.mobile-nav { position:fixed;display:grid;grid-template-columns:repeat(5,1fr);left:10px;right:10px;bottom:10px;height:58px;padding:6px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.88);box-shadow:0 10px 35px rgba(0,0,0,.16);backdrop-filter:blur(25px);z-index:20; }.mobile-nav a { display:grid;place-items:center;border-radius:12px;color:var(--secondary);font-size:10px; }.mobile-nav a.active { background:var(--blue);color:#fff; }.page-heading { align-items:flex-start; }.page-heading h1 { font-size:29px; }.heading-status { display:none; }.account-grid,.account-detail-grid { grid-template-columns:1fr; }.stats-grid { grid-template-columns:repeat(2,1fr); }.metric-card { min-height:105px;padding:16px; }.metric-card strong { font-size:21px; }.content-grid { grid-template-columns:1fr; }.chart.large { height:280px; }.toolbar { overflow-x:auto;align-items:end; }.toolbar select { min-width:120px; }.market-chart-panel { overflow:hidden; }.chart.market { height:430px; }.decision-panel { display:block; }.architecture-flow { flex-direction:column; }.architecture-flow>span { transform:rotate(90deg); }.architecture-flow div { width:100%; }.system-content { grid-template-columns:1fr; }
 }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important; } }
+
+/* 实时盘口：价格用等宽数字，跳动时位数不会左右晃动。 */
+.quote-live { padding: 0 20px 16px; }
+.quote-mid { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-bottom: 10px; }
+.quote-rows { display: grid; gap: 6px; }
+.quote-rows div { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+.quote-rows span { color: var(--muted, #86868b); }
+.quote-rows strong { font-variant-numeric: tabular-nums; font-weight: 600; }

@@ -10,22 +10,14 @@
   <label>周期<select id="market-interval"><option value="5m">5分钟</option><option value="15m" selected>15分钟</option><option value="30m">30分钟</option><option value="1h">1小时</option><option value="1m">1分钟</option></select></label>
   <button class="secondary-button" id="market-refresh">刷新</button>
 </section>
-<section class="panel">
-  <div class="panel-heading">
-    <div><h2>实时盘口</h2><p id="quotes-subtitle">两所买一卖一与基差 · 由盘口采集器每秒聚合</p></div>
-    <span id="quotes-age" class="price-badge">—</span>
-  </div>
-  <div class="table-wrap"><table class="data-table" id="quotes-table">
-    <thead><tr><th>品种</th><th>Gate 买一 / 卖一</th><th>币安 买一 / 卖一</th><th>基差（币安−Gate）</th><th>本秒帧数</th></tr></thead>
-    <tbody><tr><td colspan="5" class="empty-state">正在载入盘口…</td></tr></tbody>
-  </table></div>
-</section>
 <section class="market-layout">
   <article class="panel chart-panel market-chart-panel">
     <div class="panel-heading"><div><h2 id="market-title">ETH/USDT · Gate</h2><p id="market-subtitle">15分钟 · 已收盘K线</p></div><span id="market-price" class="price-badge">—</span></div>
     <div id="market-chart" class="chart market"><div class="chart-placeholder">正在载入K线…</div></div>
   </article>
   <aside class="panel decision-panel">
+    <div class="panel-heading"><div><h2>实时盘口</h2><p id="quote-age">—</p></div></div>
+    <div id="quote-live" class="quote-live"><div class="empty-state">正在载入盘口…</div></div>
     <div class="panel-heading"><div><h2>策略观察</h2><p>只读判断，不提供操作按钮</p></div></div>
     <dl id="market-decision" class="decision-list">
       <div><dt>震荡判断</dt><dd>—</dd></div><div><dt>价格位置</dt><dd>—</dd></div><div><dt>上轨</dt><dd>—</dd></div><div><dt>中轨</dt><dd>—</dd></div><div><dt>下轨</dt><dd>—</dd></div>

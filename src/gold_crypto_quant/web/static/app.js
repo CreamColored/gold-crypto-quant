@@ -102,36 +102,40 @@ async function loadOverview() {
 }
 
 // 盘口来自采集器写入的秒级聚合表，不是浏览器直连交易所——展示的是"最近一秒的极值"。
-// 每行显式给出数据年龄，采集器挂掉时页面必须看得出来，而不是继续显示几小时前的价格。
-function quoteSide(side){
-  if(!side) return `<span class="empty-state">无数据</span>`;
-  const stale = side.stale ? ` <span class="negative">⚠${side.age_seconds}s</span>` : "";
-  return `${money(side.bid)} / ${money(side.ask)}${stale}`;
-}
+// 必须显式给出数据年龄：采集器停掉时页面要看得出来，而不是继续显示几小时前的价格。
+let lastQuoteMid = null;
 async function loadQuotes(){
-  const data = await getJSON("/api/quotes");
-  const ages = data.quotes.flatMap(q => Object.values(q.venues).filter(Boolean).map(v => v.age_seconds));
-  const worst = ages.length ? Math.max(...ages) : null;
-  const badge = $("#quotes-age");
-  if(badge){
-    badge.textContent = worst === null ? "采集器无数据" : `数据延迟 ${worst.toFixed(1)} 秒`;
-    badge.classList.toggle("stale", worst === null || worst > 10);
+  const venue = $("#market-venue")?.value, symbol = $("#market-symbol")?.value;
+  if(!venue || !symbol) return;
+  const q = await getJSON(`/api/quotes?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}`);
+  const box = $("#quote-live"), ageLabel = $("#quote-age");
+  if(!box) return;
+  if(!q.available){
+    lastQuoteMid = null;
+    box.innerHTML = `<div class="empty-state">${esc(q.reason || "暂无盘口数据")}</div>`;
+    if(ageLabel) ageLabel.textContent = "采集器未运行";
+    return;
   }
-  const body = $("#quotes-table tbody");
-  if(!body) return;
-  body.innerHTML = data.quotes.map(q => {
-    const basis = q.basis === null
-      ? `<span class="empty-state">—</span>`
-      : `<strong class="${trendClass(q.basis)}">${q.basis >= 0 ? "+" : ""}${money(q.basis, 4)}</strong> <span class="${trendClass(q.basis)}">${pct(q.basis_rate)}</span>`;
-    const frames = Object.entries(q.venues)
-      .map(([label, side]) => `${esc(label)} ${side ? side.frame_count.toLocaleString("zh-CN") : "0"}`)
-      .join(" · ");
-    return `<tr><td><strong>${esc(q.symbol.replace("_USDT",""))}</strong></td>
-      <td>${quoteSide(q.venues["Gate"])}</td>
-      <td>${quoteSide(q.venues["币安"])}</td>
-      <td>${basis}</td>
-      <td><small>${frames}</small></td></tr>`;
-  }).join("");
+  // 与上一次相比的涨跌只用于给价格上色，不代表任何周期的涨跌幅。
+  const direction = lastQuoteMid === null ? 0 : q.mid - lastQuoteMid;
+  lastQuoteMid = q.mid;
+  const digits = q.mid >= 1000 ? 1 : 2;
+  if(ageLabel){
+    ageLabel.textContent = q.stale
+      ? `⚠ 数据已 ${q.age_seconds} 秒未更新`
+      : `延迟 ${q.age_seconds} 秒 · 本秒 ${q.frame_count.toLocaleString("zh-CN")} 帧`;
+    ageLabel.classList.toggle("stale", q.stale);
+  }
+  box.innerHTML = `
+    <div class="quote-mid ${trendClass(direction)}">${money(q.mid, digits)}</div>
+    <div class="quote-rows">
+      <div><span>卖一</span><strong class="negative">${money(q.ask, digits)}</strong></div>
+      <div><span>买一</span><strong class="positive">${money(q.bid, digits)}</strong></div>
+      <div><span>价差</span><strong>${money(q.spread, digits)}</strong></div>
+      <div><span>本秒区间</span><strong>${money(q.second_low, digits)} – ${money(q.second_high, digits)}</strong></div>
+    </div>`;
+  const badge = $("#market-price");
+  if(badge){ badge.textContent = money(q.mid, digits); badge.classList.toggle("stale", q.stale); }
 }
 
 let marketChart;
@@ -177,10 +181,18 @@ document.addEventListener("DOMContentLoaded",()=>{
   if(page==="dashboard"){startPolling(loadOverview,10000);}
   if(page==="accounts"){startPolling(loadOverview,15000);}
   if(page==="market"){
-    // 盘口每秒更新，K线30秒才变一次；合并成一个任务，按盘口的节奏刷新。
-    startPolling(async()=>{await Promise.all([loadMarket(),loadQuotes()]);},5000);
-    $("#market-refresh").addEventListener("click",manual(loadMarket));
-    ["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",manual(loadMarket)));
+    // 盘口每秒变、K线要30秒才变一次：统一2秒一轮，K线每15轮才重新拉，
+    // 既让价格跳动可见，又不会每2秒重算一遍布林带。
+    let tick = 0;
+    startPolling(async()=>{
+      const jobs = [loadQuotes()];
+      if(tick % 15 === 0) jobs.push(loadMarket());
+      tick += 1;
+      await Promise.all(jobs);
+    },2000);
+    const reloadBoth = manual(async()=>{ tick = 0; lastQuoteMid = null; await Promise.all([loadMarket(),loadQuotes()]); });
+    $("#market-refresh").addEventListener("click",reloadBoth);
+    ["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",reloadBoth));
   }
   if(page==="trades"){
     const reload=manual(()=>loadTrades(1));

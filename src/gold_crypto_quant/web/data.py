@@ -261,62 +261,62 @@ def build_overview(engine: Engine, *, viewer: Any) -> dict[str, Any]:
     }
 
 
-def build_live_quotes(engine: Engine, *, stale_after_seconds: int = 10) -> dict:
-    """返回两个交易所三个品种的最新盘口，以及同一时刻的基差。
+def build_live_quotes(
+    engine: Engine,
+    *,
+    venue: str,
+    symbol: str,
+    stale_after_seconds: int = 10,
+) -> dict:
+    """返回指定交易所与品种的最新盘口。
 
-    数据来自盘口采集器写入的秒级聚合表，不是浏览器直连交易所——因此页面上看到的
-    是"最近一秒的极值"，不是逐帧跳动。每行带上数据年龄，超过阈值即标记为陈旧，
-    避免采集器挂掉时页面还显示着几小时前的价格却看不出来。
+    数据来自盘口采集器写入的秒级聚合表，不是浏览器直连交易所——展示的是
+    "最近一秒的极值"，不是逐帧跳动。因此必须带上数据年龄：采集器停掉时页面要
+    看得出来，而不是继续显示几小时前的价格还一副正常样子。
 
-    基差是这套双所对照实验的关键观测量：2026-09-03 13:23 那一笔，
-    Gate 的 ETH 差 0.38 点没触到轨、币安穿了 0.41 点，两边就此分叉了 115U。
+    买一取该秒的最高买价、卖一取该秒的最低卖价，即这一秒里最紧的盘口。
     """
     now = datetime.now(UTC)
-    rows = {}
     with Session(engine) as session:
-        for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
-            for symbol in QUOTE_SYMBOLS:
-                latest = session.execute(
-                    select(MarketQuoteSecond, Instrument.symbol, Instrument.venue)
-                    .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
-                    .where(Instrument.venue == venue, Instrument.symbol == symbol)
-                    .order_by(MarketQuoteSecond.bucket_time.desc())
-                    .limit(1)
-                ).first()
-                if latest is not None:
-                    rows[(venue, symbol)] = latest[0]
+        record = session.execute(
+            select(MarketQuoteSecond)
+            .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
+            .where(Instrument.venue == venue, Instrument.symbol == symbol)
+            .order_by(MarketQuoteSecond.bucket_time.desc())
+            .limit(1)
+        ).scalar_one_or_none()
 
-    quotes = []
-    for symbol in QUOTE_SYMBOLS:
-        gate = rows.get((GATE_LIVE_VENUE, symbol))
-        binance = rows.get((BINANCE_LIVE_VENUE, symbol))
-        entry: dict = {"symbol": symbol, "venues": {}}
-        for label, record in (("Gate", gate), ("币安", binance)):
-            if record is None:
-                entry["venues"][label] = None
-                continue
-            age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
-            entry["venues"][label] = {
-                "bid": float(record.bid_high),
-                "ask": float(record.ask_low),
-                "bid_low": float(record.bid_low),
-                "ask_high": float(record.ask_high),
-                "frame_count": record.frame_count,
-                "age_seconds": round(age, 1),
-                "stale": age > stale_after_seconds,
-            }
-        gate_side = entry["venues"]["Gate"]
-        binance_side = entry["venues"]["币安"]
-        if gate_side and binance_side:
-            gate_mid = (gate_side["bid"] + gate_side["ask"]) / 2
-            binance_mid = (binance_side["bid"] + binance_side["ask"]) / 2
-            entry["basis"] = round(binance_mid - gate_mid, 4)
-            entry["basis_rate"] = (binance_mid - gate_mid) / gate_mid if gate_mid else 0.0
-        else:
-            entry["basis"] = None
-            entry["basis_rate"] = None
-        quotes.append(entry)
-    return {"generated_at": now.isoformat(), "quotes": quotes}
+    if record is None:
+        return {
+            "venue": venue, "symbol": symbol, "available": False,
+            "reason": "盘口采集器尚未写入该品种数据",
+            "generated_at": now.isoformat(),
+        }
+    age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
+    # 展示当前价必须用同一帧的快照：极值来自秒内不同瞬间，
+    # 拿最高买价配最低卖价会得到买一高于卖一的交叉盘口。
+    # 快照列是后加的，改动前写入的旧行没有值，退回用极值中点近似。
+    if record.bid_close is not None and record.ask_close is not None:
+        bid, ask = float(record.bid_close), float(record.ask_close)
+    else:
+        bid = (float(record.bid_low) + float(record.bid_high)) / 2
+        ask = (float(record.ask_low) + float(record.ask_high)) / 2
+    return {
+        "venue": venue,
+        "symbol": symbol,
+        "available": True,
+        "bid": bid,
+        "ask": ask,
+        "mid": (bid + ask) / 2,
+        "spread": ask - bid,
+        "second_low": float(record.bid_low),
+        "second_high": float(record.ask_high),
+        "frame_count": record.frame_count,
+        "bucket_time": record.bucket_time.replace(tzinfo=UTC).isoformat(),
+        "age_seconds": round(age, 1),
+        "stale": age > stale_after_seconds,
+        "generated_at": now.isoformat(),
+    }
 
 
 def build_market_chart(

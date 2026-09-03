@@ -101,6 +101,12 @@ class MarketQuoteSecond(Base):
     ask_high: Mapped[Decimal] = mapped_column(
         Numeric(28, 12), nullable=False, comment="该秒最高卖一价"
     )
+    bid_close: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 12), comment="该秒最后一帧的买一价"
+    )
+    ask_close: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 12), comment="该秒最后一帧的卖一价"
+    )
     frame_count: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="该秒收到的盘口帧数，骤降即连接异常"
     )
@@ -143,6 +149,12 @@ class MarketQuoteMinute(Base):
     )
     ask_high: Mapped[Decimal] = mapped_column(
         Numeric(28, 12), nullable=False, comment="该分钟最高卖一价"
+    )
+    bid_close: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 12), comment="该分钟最后一帧的买一价"
+    )
+    ask_close: Mapped[Decimal | None] = mapped_column(
+        Numeric(28, 12), comment="该分钟最后一帧的卖一价"
     )
     frame_count: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="该分钟收到的盘口帧数"

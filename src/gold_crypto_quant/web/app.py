@@ -272,9 +272,14 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/quotes")
-    def quotes_api(request: Request, _user=Depends(current_admin)):
+    def quotes_api(
+        request: Request,
+        venue: str = Query(default="GATE_LIVE_PUBLIC"),
+        symbol: str = Query(default="ETH_USDT"),
+        _user=Depends(current_admin),
+    ):
         # 盘口是公开行情，不含账户信息，因此不按 viewer 过滤。
-        return build_live_quotes(request.app.state.engine)
+        return build_live_quotes(request.app.state.engine, venue=venue, symbol=symbol)
 
     @app.get("/api/trades")
     def trades_api(
