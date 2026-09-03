@@ -1,5 +1,7 @@
 """MySQL 连接、健康检查和表结构初始化。"""
 
+from functools import lru_cache
+
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.schema import CreateColumn
 
@@ -7,11 +9,17 @@ from gold_crypto_quant.config import get_settings
 from gold_crypto_quant.storage.base import Base
 
 
+@lru_cache
 def build_engine() -> Engine:
-    """根据本地配置创建 SQLAlchemy Engine。
+    """返回进程内唯一的 SQLAlchemy Engine。
 
     ``pool_pre_ping`` 会在复用连接前检查其是否存活；``pool_recycle`` 避免连接因
     MySQL 超时被服务端关闭后仍留在连接池中。
+
+    这里必须缓存：几十个存储函数都写成 ``engine or build_engine()``，每次新建
+    Engine 就等于新建一个空连接池，下一次查询要重做 TCP 与 MySQL 认证握手。
+    数据库在公网时单次握手实测约 514 毫秒，一轮行情对照要付几十次，
+    是轮询间隔从60秒涨到119秒的主因。Engine 本身线程安全，共享没有风险。
     """
     # get_settings() 从 .env 取得连接地址；密码不会出现在调用方代码中。
     return create_engine(
@@ -19,6 +27,14 @@ def build_engine() -> Engine:
         pool_pre_ping=True,
         pool_recycle=1800,
     )
+
+
+def reset_engine() -> None:
+    """丢弃缓存的 Engine 并关闭其连接池；配置变更或测试收尾时调用。"""
+    cached = build_engine.cache_info().currsize
+    if cached:
+        build_engine().dispose()
+    build_engine.cache_clear()
 
 
 def check_connection(engine: Engine | None = None) -> bool:
