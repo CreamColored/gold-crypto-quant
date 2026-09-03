@@ -169,3 +169,30 @@ def test_dingtalk_failure_is_logged_not_swallowed(monkeypatch) -> None:
     # 日志里不能出现 webhook 的 access_token。
     assert "token" not in logged[0]
     assert sent_mail == []
+
+
+def test_dingtalk_rate_limit_drop_is_logged(monkeypatch) -> None:
+    """被本地限流丢弃也要留痕——爆发止损那几分钟最需要告警，静默丢掉最危险。"""
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.latest_paper_trade_id",
+        lambda: 0,
+    )
+    logged: list[str] = []
+    settings = Settings(
+        status_email_to="",
+        dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=token",
+        dingtalk_secret=SecretStr("SECdeadbeef"),
+    )
+    notifier = RuntimeEventNotifier(settings, reporter=logged.append)
+    # send 返回 False 表示被限流丢弃，不抛异常。
+    monkeypatch.setattr(notifier.dingtalk, "send", lambda _message: False)
+
+    notifier.send(
+        event_key="rotation-v5:止损",
+        event_title="模拟平仓：固定保护止损",
+        event_lines=("品种：BTC_USDT",),
+        category="TRADE",
+    )
+
+    assert len(logged) == 1
+    assert "钉钉推送被本地限流丢弃" in logged[0]

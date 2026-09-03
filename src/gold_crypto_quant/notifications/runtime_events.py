@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gold_crypto_quant.config import Settings
 from gold_crypto_quant.notifications.dingtalk_bot import (
+    RATE_LIMIT_PER_MINUTE,
     DingtalkError,
     DingtalkNotifier,
     build_markdown,
@@ -65,7 +66,7 @@ class RuntimeEventNotifier:
         if not self.dingtalk.enabled:
             return
         try:
-            self.dingtalk.send(
+            delivered = self.dingtalk.send(
                 build_markdown(
                     event_title=event_title,
                     event_lines=event_lines,
@@ -73,6 +74,13 @@ class RuntimeEventNotifier:
                     status_lines=status_lines,
                 )
             )
+            if not delivered:
+                # 本地限流丢弃同样要留痕：集中爆发止损那几分钟最需要告警，
+                # 静默丢掉会让人误以为通道正常。
+                self.reporter(
+                    f"钉钉推送被本地限流丢弃（{event_title}）："
+                    f"每分钟上限{RATE_LIMIT_PER_MINUTE}条"
+                )
         except (DingtalkError, OSError, ValueError) as error:
             # 只输出异常类型与消息，webhook 的 access_token 不进日志。
             self.reporter(f"钉钉推送失败（{event_title}）：{type(error).__name__}: {error}")
