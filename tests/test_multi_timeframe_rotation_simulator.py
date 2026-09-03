@@ -645,6 +645,17 @@ def test_structure_needs_enough_history_for_macd() -> None:
     assert _has_bottom_structure(short) is False
 
 
+def test_holdings_never_renders_blank() -> None:
+    """任何返回路径都要给出持仓摘要，空白会让通知里出现孤零零的"持仓："一行。"""
+    import inspect
+
+    from gold_crypto_quant.runtime import multi_timeframe_rotation_simulator as module
+
+    source = inspect.getsource(module.run_multi_timeframe_paper_cycle)
+    returns = source.count("return MultiTimeframePaperSummary(")
+    assert returns == source.count("holdings=")
+
+
 def test_duration_renders_for_phone_notifications() -> None:
     """持仓时长要在钉钉里一眼可读；不足一分钟按一分钟显示，不出现0分钟。"""
     assert _format_duration(pd.Timedelta(seconds=20)) == "1分钟"

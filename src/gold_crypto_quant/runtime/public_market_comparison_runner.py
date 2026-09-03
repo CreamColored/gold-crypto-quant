@@ -238,6 +238,13 @@ class PublicMarketComparisonRunner:
                 f"状态 {item.summary.paper_status} / 新信号 {item.summary.new_signal_count}"
             )
 
+        def holding_line(label: str) -> str:
+            """列出该账户此刻在场的仓位；手机上一眼看清手里还有什么。"""
+            item = by_label.get(label)
+            if item is None:
+                return f"{label}持仓：本轮行情异常"
+            return f"{label}持仓：{item.summary.paper_holdings or '未知'}"
+
         gate = by_label.get("Gate")
         binance = by_label.get("币安")
         difference = (
@@ -247,7 +254,9 @@ class PublicMarketComparisonRunner:
         )
         return (
             account_line("Gate"),
+            holding_line("Gate"),
             account_line("币安"),
+            holding_line("币安"),
             difference,
             "对照规则：同策略、同初始资金、各自行情、账户互不影响",
             "真实交易：False",

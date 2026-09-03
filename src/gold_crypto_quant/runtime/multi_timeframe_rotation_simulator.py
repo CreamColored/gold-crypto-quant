@@ -102,6 +102,8 @@ class MultiTimeframePaperSummary:
     selected_symbol: str
     selected_interval: str
     reason: str
+    # 供通知直接展示的当前持仓摘要；无持仓时为"全部空仓"。
+    holdings: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -709,6 +711,8 @@ def run_multi_timeframe_paper_cycle(
             selected_symbol="",
             selected_interval="",
             reason="V5共享影子账户已从各品种各周期最新收盘K线开始",
+            # 首次建账必然无持仓；不写死会让通知里出现空白的"持仓："一行。
+            holdings="全部空仓",
         )
 
     # 老状态文件里没见过的新品种（例如新接入的XAU_USDT）在此原地补齐游标和仓位槽位，
@@ -1398,6 +1402,31 @@ def run_multi_timeframe_paper_cycle(
         for symbol, position in state.positions.items()
         if position.position_side
     ]
+
+    def last_price(symbol: str) -> float:
+        """取该品种最新收盘价；1分钟序列最新，缺失时退回主周期。"""
+        if micro_contexts and symbol in micro_contexts:
+            frame = micro_contexts[symbol][0]
+            if not frame.empty:
+                return float(frame["close"].iloc[-1])
+        return float(bars_by_symbol[symbol][INTERVAL_PRIORITY[0]]["close"].iloc[-1])
+
+    def holding_text(symbol: str) -> str:
+        """把单个品种的在场仓位压缩成一句话，含浮动盈亏。"""
+        position = state.positions[symbol]
+        mark = last_price(symbol)
+        floating = (
+            (mark - position.entry_price) * position.remaining_quantity
+            if position.position_side == "LONG"
+            else (position.entry_price - mark) * position.remaining_quantity
+        )
+        return (
+            f"{_base_asset(symbol)} {'多' if position.position_side == 'LONG' else '空'} "
+            f"{position.remaining_quantity:.6f} @{position.entry_price:.2f} "
+            f"现价{mark:.2f}（浮动{floating:+.2f}U）"
+        )
+
+    held = [holding_text(symbol) for symbol, _side, _interval in active]
     return MultiTimeframePaperSummary(
         status="FUSED" if state.permanent_fuse else "RUNNING",
         processed_bars=processed_bars,
@@ -1409,4 +1438,5 @@ def run_multi_timeframe_paper_cycle(
         selected_symbol=selected[0],
         selected_interval=selected[1],
         reason="V5.7按1分钟触轨即时执行，不等待主周期收线；Gate订单提交接口未调用",
+        holdings="；".join(held) if held else "全部空仓",
     )

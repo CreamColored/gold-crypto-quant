@@ -23,6 +23,8 @@ class BollingerSignalCycleSummary:
     paper_status: str = "NOT_STARTED"
     paper_equity: float = 0.0
     paper_events: tuple[RotationPaperEvent, ...] = ()
+    # 当前在场仓位摘要，直接进通知；无持仓时为"全部空仓"。
+    paper_holdings: str = ""
 
 
 def run_bollinger_signal_cycle(
@@ -106,4 +108,5 @@ def run_bollinger_signal_cycle(
         paper_status=paper.status,
         paper_equity=paper.equity,
         paper_events=paper.events,
+        paper_holdings=paper.holdings,
     )

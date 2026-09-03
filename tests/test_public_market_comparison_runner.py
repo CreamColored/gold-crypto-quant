@@ -98,6 +98,7 @@ def test_comparison_email_summary_shows_both_equities_and_difference() -> None:
                 reason="test",
                 paper_status="RUNNING",
                 paper_equity=10_012.5,
+                paper_holdings="BTC 多 0.079385 @77497.70 现价77600.00（浮动+8.13U）",
             ),
         ),
         ComparisonFeedResult(
@@ -110,6 +111,7 @@ def test_comparison_email_summary_shows_both_equities_and_difference() -> None:
                 reason="test",
                 paper_status="RUNNING",
                 paper_equity=10_008.0,
+                paper_holdings="全部空仓",
             ),
         ),
     ]
@@ -119,3 +121,30 @@ def test_comparison_email_summary_shows_both_equities_and_difference() -> None:
     assert "Gate影子账户：权益 10012.50U / 状态 RUNNING / 新信号 1" in lines
     assert "币安影子账户：权益 10008.00U / 状态 RUNNING / 新信号 0" in lines
     assert "权益差（Gate-币安）：+4.50U" in lines
+    # 每条交易通知都要能直接看出此刻手里还有什么，不用再去翻后台。
+    assert "Gate持仓：BTC 多 0.079385 @77497.70 现价77600.00（浮动+8.13U）" in lines
+    assert "币安持仓：全部空仓" in lines
+
+
+def test_status_lines_mark_missing_feed_for_both_equity_and_holdings() -> None:
+    """某个交易所本轮失败时，权益和持仓都要显式标注异常，不能静默显示成空仓。"""
+    results = [
+        ComparisonFeedResult(
+            "Gate",
+            10,
+            BollingerSignalCycleSummary(
+                status="SHADOW_RUNNING",
+                new_signal_count=0,
+                order_count=0,
+                reason="test",
+                paper_status="RUNNING",
+                paper_equity=10_000.0,
+                paper_holdings="全部空仓",
+            ),
+        )
+    ]
+
+    lines = PublicMarketComparisonRunner._comparison_status_lines(results)
+
+    assert "币安影子账户：本轮行情异常" in lines
+    assert "币安持仓：本轮行情异常" in lines
