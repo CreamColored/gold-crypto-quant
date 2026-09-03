@@ -18,3 +18,4 @@ build/
 claude-handoff/
 claude-handoff-*.zip
 var/backups/
+var/replay/

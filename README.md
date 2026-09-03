@@ -162,6 +162,23 @@ ETH 5m/15m 5点、30m/1h 10点。BTC与ETH可以同时持仓，但同一币种�
 
 未命中结构的仓位保持原规则：中轨减仓、对侧轨止盈、箱体仍有效时反手。
 
+## 运维脚本
+
+```bash
+.venv/bin/python scripts/backup.py
+```
+
+备份影子状态与监管表、轮转超限日志、清理7天前的旧备份，输出到 `var/backups/<时间戳>/`。
+
+```bash
+.venv/bin/python scripts/replay_structure_rule.py 2026-09-02
+```
+
+顶底结构规则的对照复盘：同一段行情逐分钟跑两遍影子模拟器，一遍关闭结构判定、一遍开启，
+打印两组的交易台账并把明细写到 `var/replay/<日期>/result.json`。必须逐分钟驱动而不是一次性
+喂整段行情——`box_active` 是单份可变状态，一次性回放会让分钟循环读到收盘后的箱体结论。
+两组输出都不写数据库，也不碰线上的 `.runtime` 状态文件。
+
 ## 即时邮件通知
 
 邮件已从固定四小时摘要改为事件触发，不再使用 `STATUS_EMAIL_INTERVAL_HOURS`。启用SMTP后，

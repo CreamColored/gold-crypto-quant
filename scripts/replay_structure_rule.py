@@ -1,0 +1,179 @@
+"""顶底结构规则的对照复盘：同一段行情分别在关闭/开启结构规则下跑影子模拟器。
+
+用法：
+    .venv/bin/python scripts/replay_structure_rule.py 2026-09-02
+
+必须逐分钟驱动而不是一次性喂整段行情：box_active 是单份可变状态，
+一次性回放会让分钟循环读到收盘后的箱体结论，等于偷看未来。
+
+结果写入 var/replay/<日期>.json，控制台打印两组的交易台账。
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from gold_crypto_quant.runtime import multi_timeframe_rotation_simulator as sim  # noqa: E402
+from gold_crypto_quant.storage.market_bars import load_market_bars  # noqa: E402
+
+VENUE = "GATE_LIVE_PUBLIC"
+SYMBOLS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+MAIN_INTERVALS = ("5m", "15m", "30m", "1h")
+OUTPUT_ROOT = Path("var/replay")
+# 单轮只保留最近若干根，既够MACD和布林带收敛，也避免每分钟重算整年历史。
+WINDOW = 400
+
+
+def load_bars(end: pd.Timestamp):
+    """读取截止到end的行情；主周期四档加1分钟触轨序列。"""
+    main = {
+        symbol: {
+            interval: load_market_bars(symbol, interval, limit=3000, venue=VENUE)
+            for interval in MAIN_INTERVALS
+        }
+        for symbol in SYMBOLS
+    }
+    micro = {symbol: load_market_bars(symbol, "1m", limit=3000, venue=VENUE) for symbol in SYMBOLS}
+    main = {s: {i: b.loc[b.index < end] for i, b in d.items()} for s, d in main.items()}
+    micro = {s: m.loc[m.index < end] for s, m in micro.items()}
+    return main, micro
+
+
+def run(tag, minutes, main, micro, state_dir, *, disable_structure):
+    """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。"""
+    original = (sim._has_top_structure, sim._has_bottom_structure)
+    if disable_structure:
+        sim._has_top_structure = lambda *_a, **_k: False
+        sim._has_bottom_structure = lambda *_a, **_k: False
+    state_path = state_dir / f"state-{tag}.json"
+    state_path.unlink(missing_ok=True)
+    events, equity = [], 10_000.0
+    try:
+        for index, now in enumerate(minutes):
+            # 与线上一致：此刻只能看到已经收盘的K线。
+            main_slice = {
+                s: {
+                    i: b.loc[b.index + sim.INTERVAL_DURATION[i] <= now].tail(WINDOW)
+                    for i, b in d.items()
+                }
+                for s, d in main.items()
+            }
+            micro_slice = {
+                s: m.loc[m.index + pd.Timedelta(minutes=1) <= now].tail(WINDOW)
+                for s, m in micro.items()
+            }
+            if any(len(b) < 30 for d in main_slice.values() for b in d.values()):
+                continue
+            if any(len(m) < 65 for m in micro_slice.values()):
+                continue
+            summary = sim.run_multi_timeframe_paper_cycle(
+                main_slice, micro_bars_by_symbol=micro_slice, state_path=state_path
+            )
+            events.extend(summary.events)
+            equity = summary.equity
+            if index % 200 == 0:
+                print(f"  {tag} {now} 权益 {equity:.2f} 事件 {len(events)}", flush=True)
+    finally:
+        sim._has_top_structure, sim._has_bottom_structure = original
+    return [
+        {"title": item.title, "lines": list(item.lines), "severity": item.severity}
+        for item in events
+    ], equity
+
+
+def _field(lines, key):
+    for line in lines:
+        if line.startswith(key):
+            return line.split("：", 1)[1]
+    return ""
+
+
+def ledger(events):
+    """把开仓、减仓、平仓事件还原成一笔一笔的交易。"""
+    trades, open_trades = [], {}
+    for event in events:
+        symbol = _field(event["lines"], "品种")
+        moment = _field(event["lines"], "北京时间")[:16]
+        if "模拟开仓" in event["title"]:
+            trade = {
+                "开仓": moment,
+                "品种": symbol,
+                "周期": _field(event["lines"], "交易周期"),
+                "方向": "空" if "做空" in event["title"] else "多",
+                "结构": "有" if "已确认" in " ".join(event["lines"]) else "无",
+                "盈亏": 0.0,
+                "结束": "",
+                "原因": "",
+            }
+            open_trades[symbol] = trade
+            trades.append(trade)
+        elif symbol in open_trades:
+            trade = open_trades[symbol]
+            value = _field(event["lines"], "本次净盈亏")
+            if value:
+                trade["盈亏"] += float(value.split()[0])
+            trade["结束"] = moment
+            trade["原因"] = event["title"].replace("模拟平仓：", "")
+            # 减仓不结束这笔交易，只有平仓才把它从在场仓位里摘掉。
+            if "减仓" not in event["title"]:
+                open_trades.pop(symbol, None)
+    return trades
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("用法：scripts/replay_structure_rule.py <YYYY-MM-DD>")
+        return 2
+    day = sys.argv[1]
+    end = pd.Timestamp(day, tz="UTC") + pd.Timedelta(days=1)
+    main_bars, micro_bars = load_bars(end)
+
+    # 起点取所有品种都攒够65根1分钟K线的时刻；XAU上线晚于BTC和ETH。
+    start = max(m.index[64] for m in micro_bars.values()) + pd.Timedelta(minutes=1)
+    minutes = [t for t in micro_bars["ETH_USDT"].index if t >= start]
+    if not minutes:
+        print(f"{day} 没有可回放的1分钟行情")
+        return 1
+    print(f"回放 {minutes[0]} → {minutes[-1]}，共 {len(minutes)} 分钟")
+
+    target = OUTPUT_ROOT / day
+    target.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for tag, disabled in (("baseline", True), ("structure", False)):
+        events, equity = run(
+            tag, minutes, main_bars, micro_bars, target, disable_structure=disabled
+        )
+        results[tag] = {"equity": equity, "events": events, "trades": ledger(events)}
+        # 每跑完一组就落盘，打印环节出错也不会白跑一遍。
+        (target / "result.json").write_text(
+            json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    for tag, data in results.items():
+        trades = data["trades"]
+        wins = [t for t in trades if t["盈亏"] > 0]
+        losses = [t for t in trades if t["盈亏"] < 0]
+        decided = len(wins) + len(losses)
+        rate = f"{len(wins) / decided:.0%}" if decided else "—"
+        label = "关闭结构规则" if tag == "baseline" else "开启结构规则"
+        print(
+            f"\n===== {label} =====  权益 {data['equity']:.2f}  "
+            f"净盈亏 {data['equity'] - 10_000:+.2f}U  "
+            f"{len(trades)}笔  盈{len(wins)} 亏{len(losses)}  胜率 {rate}"
+        )
+        for trade in trades:
+            print(
+                f"  {trade['开仓']} {trade['品种']:9s} {trade['周期']:3s} {trade['方向']} "
+                f"结构{trade['结构']} → {trade['结束'][11:]:6s} {trade['原因']:22s} "
+                f"{trade['盈亏']:+8.2f}U"
+            )
+    print(f"\n明细已写入 {target / 'result.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
