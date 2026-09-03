@@ -228,7 +228,26 @@ async function loadTrades(page=tradePage) {
 }
 
 function uptime(seconds){const d=Math.floor(seconds/86400),h=Math.floor(seconds%86400/3600),m=Math.floor(seconds%3600/60);return `${d}天 ${h}小时 ${m}分钟`;}
-async function loadSystem(){const data=await getJSON("/api/system");$("#system-cards").innerHTML=`<article class="metric-card"><span>整机CPU</span><strong>${data.cpu_percent.toFixed(1)}%</strong><small>当前短采样</small></article><article class="metric-card"><span>内存</span><strong>${data.memory_percent.toFixed(1)}%</strong><small>${data.memory_used_gib.toFixed(1)} / ${data.memory_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>数据盘</span><strong>${data.disk_percent.toFixed(1)}%</strong><small>${data.disk_used_gib.toFixed(1)} / ${data.disk_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>开机时长</span><strong>${uptime(data.uptime_seconds).split(" ")[0]}</strong><small>${uptime(data.uptime_seconds)}</small></article>`;$("#process-status").innerHTML=`<div><dt>双行情服务</dt><dd class="${data.comparison_running?"positive":"negative"}">${data.comparison_running?"RUNNING":"STOPPED"}</dd></div><div><dt>双行情PID</dt><dd>${data.comparison_pid||"—"}</dd></div><div><dt>Web监管PID</dt><dd>${data.web_pid}</dd></div><div><dt>主机</dt><dd>${esc(data.hostname)}</dd></div>`;}
+async function loadSystem(){const data=await getJSON("/api/system");$("#system-cards").innerHTML=`<article class="metric-card"><span>整机CPU</span><strong>${data.cpu_percent.toFixed(1)}%</strong><small>当前短采样</small></article><article class="metric-card"><span>内存</span><strong>${data.memory_percent.toFixed(1)}%</strong><small>${data.memory_used_gib.toFixed(1)} / ${data.memory_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>数据盘</span><strong>${data.disk_percent.toFixed(1)}%</strong><small>${data.disk_used_gib.toFixed(1)} / ${data.disk_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>开机时长</span><strong>${uptime(data.uptime_seconds).split(" ")[0]}</strong><small>${uptime(data.uptime_seconds)}</small></article>`;$("#process-status").innerHTML=`<div><dt>双行情服务</dt><dd class="${data.comparison_running?"positive":"negative"}">${data.comparison_running?"RUNNING":"STOPPED"}</dd></div><div><dt>双行情PID</dt><dd>${data.comparison_pid||"—"}</dd></div><div><dt>Web监管PID</dt><dd>${data.web_pid}</dd></div><div><dt>主机</dt><dd>${esc(data.hostname)}</dd></div>`;renderCollector(data.quote_collector);}
+
+// 采集器健康只能在这里看：行情页的价格是浏览器直连交易所的，采集器停了那边照样跳动，
+// 而策略和回测用的正是采集器落库的数据。
+function renderCollector(health){
+  const summary=$("#collector-summary"), list=$("#collector-status");
+  if(!summary||!list) return;
+  if(!health){ summary.textContent="状态不可用"; list.innerHTML=""; return; }
+  const ok = health.status==="HEALTHY";
+  summary.innerHTML=`<span class="stream-dot ${ok?"":"down"}"></span>${esc(health.status)} · ${health.healthy}/${health.total} 条流正常`
+    + (health.worst_age_seconds===null?"":` · 最新数据 ${health.worst_age_seconds} 秒前`);
+  summary.classList.toggle("stale", !ok);
+  list.innerHTML = health.streams.map(item=>{
+    const healthy = item.status==="HEALTHY";
+    const detail = item.age_seconds===null
+      ? "无数据"
+      : `${item.age_seconds}s 前 · ${item.frame_count.toLocaleString("zh-CN")} 帧/秒`;
+    return `<div><dt>${esc(item.label)} ${esc(item.symbol.replace("_USDT",""))}</dt><dd class="${healthy?"positive":"negative"}">${esc(detail)}</dd></div>`;
+  }).join("");
+}
 
 document.addEventListener("DOMContentLoaded",()=>{
   const page=document.body.dataset.page;
@@ -258,5 +277,5 @@ document.addEventListener("DOMContentLoaded",()=>{
     $("#trade-prev").addEventListener("click",manual(()=>loadTrades(tradePage-1)));
     $("#trade-next").addEventListener("click",manual(()=>loadTrades(tradePage+1)));
   }
-  if(page==="system"){startPolling(loadSystem,10000);}
+  if(page==="system"){startPolling(loadSystem,60000);}
 });

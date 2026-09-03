@@ -458,8 +458,65 @@ def build_trade_events(
     }
 
 
-def build_system_status() -> dict[str, Any]:
-    """返回Mac和两个本地进程的只读运行状态。"""
+# 盘口最新数据超过这个秒数即判定采集异常。采集器每秒落盘一次，
+# 30秒已经是60轮没写进来了，不可能是正常抖动。
+QUOTE_COLLECTOR_STALE_SECONDS = 30
+QUOTE_COLLECTOR_DOWN_SECONDS = 300
+
+
+def build_quote_collector_health(engine: Engine) -> dict[str, Any]:
+    """汇总盘口采集器各条流的新鲜度。
+
+    行情页的实时价是浏览器直连交易所的，采集器停了那里照样跳动、完全看不出来；
+    而策略与回测用的正是采集器落库的这份数据，因此它的健康必须单独有观察点。
+    """
+    now = datetime.now(UTC)
+    streams: list[dict[str, Any]] = []
+    with Session(engine) as session:
+        for venue, label in ((GATE_LIVE_VENUE, "Gate"), (BINANCE_LIVE_VENUE, "币安")):
+            for symbol in QUOTE_SYMBOLS:
+                record = session.execute(
+                    select(MarketQuoteSecond)
+                    .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
+                    .where(Instrument.venue == venue, Instrument.symbol == symbol)
+                    .order_by(MarketQuoteSecond.bucket_time.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if record is None:
+                    streams.append({"label": label, "symbol": symbol, "age_seconds": None,
+                                    "frame_count": 0, "status": "NO_DATA"})
+                    continue
+                age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
+                status = (
+                    "HEALTHY" if age <= QUOTE_COLLECTOR_STALE_SECONDS
+                    else "STALE" if age <= QUOTE_COLLECTOR_DOWN_SECONDS
+                    else "STOPPED"
+                )
+                streams.append({
+                    "label": label, "symbol": symbol, "age_seconds": round(age, 1),
+                    "frame_count": record.frame_count, "status": status,
+                })
+    ages = [item["age_seconds"] for item in streams if item["age_seconds"] is not None]
+    # 整体取最差的一条：任何一条流停了都说明采集不完整，不能被其他流掩盖。
+    if not ages:
+        overall = "NO_DATA"
+    elif max(ages) > QUOTE_COLLECTOR_DOWN_SECONDS:
+        overall = "STOPPED"
+    elif max(ages) > QUOTE_COLLECTOR_STALE_SECONDS:
+        overall = "STALE"
+    else:
+        overall = "HEALTHY"
+    return {
+        "status": overall,
+        "worst_age_seconds": max(ages) if ages else None,
+        "healthy": sum(1 for item in streams if item["status"] == "HEALTHY"),
+        "total": len(streams),
+        "streams": streams,
+    }
+
+
+def build_system_status(engine: Engine | None = None) -> dict[str, Any]:
+    """返回Mac和本地进程的只读运行状态；传入engine时一并给出采集器健康。"""
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(str(Path.cwd()))
     boot = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
@@ -487,4 +544,5 @@ def build_system_status() -> dict[str, Any]:
         "web_pid": os.getpid(),
         "live_trading": False,
         "order_submission": False,
+        "quote_collector": build_quote_collector_health(engine) if engine is not None else None,
     }

@@ -300,7 +300,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         )
 
     @app.get("/api/system")
-    def system_api(_user=Depends(current_admin)):
-        return build_system_status()
+    def system_api(request: Request, _user=Depends(current_admin)):
+        return build_system_status(request.app.state.engine)
 
     return app
