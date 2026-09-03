@@ -15,6 +15,8 @@ def test_core_table_names_are_registered() -> None:
         "instruments",
         "market_bars",
         "market_data_health_states",
+        "market_quotes_minute",
+        "market_quotes_second",
         "orders",
         "paper_account_states",
         "paper_simulation_daily_metrics",

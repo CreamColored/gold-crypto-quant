@@ -29,6 +29,9 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_KEEP = 5
 # K线可以随时从交易所重新拉取，导出它只会让备份膨胀到几十MB。
 TABLES = (
+    # 盘口分钟聚合必须备份：交易所不提供盘口历史，丢了无法重建。
+    # 秒级表不备份——它是30天滚动的研究数据，量大且可再采。
+    "market_quotes_minute",
     "app_users",
     "trading_accounts",
     "instruments",

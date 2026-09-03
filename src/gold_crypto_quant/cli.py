@@ -147,6 +147,7 @@ def main() -> None:
             "market-runner",
             "market-runner-status",
             "public-market-comparison",
+            "quote-collector",
             "web-init-admin",
             "web-run",
             "oanda-runner",
@@ -1111,6 +1112,20 @@ def main() -> None:
                 )
                 print(f"  原因: {health.reason}")
         print("Exchange order submission available: False")
+        return
+    if args.command == "quote-collector":
+        # 只采集盘口，不参与任何交易判定；策略仍按已收盘K线运行。
+        import asyncio
+
+        from gold_crypto_quant.runtime.quote_collector import QuoteCollector
+
+        create_schema()
+        collector = QuoteCollector(reporter=_runtime_log)
+        _runtime_log("盘口采集：Gate与币安 bookTicker，按秒与按分钟聚合入库")
+        try:
+            asyncio.run(collector.run())
+        except KeyboardInterrupt:
+            _runtime_log("收到中断信号，正在冲刷剩余数据")
         return
     if args.command == "public-market-comparison":
         # 两个实盘公共行情源只进入隔离的本地影子账户，不读取任何交易所API密钥。

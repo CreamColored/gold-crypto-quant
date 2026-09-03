@@ -61,6 +61,100 @@ class Instrument(Base):
     )
 
 
+class MarketQuoteSecond(Base):
+    """按秒聚合的买一卖一极值；触轨判定只关心区间内极值，不需要逐帧留存。
+
+    盘口每秒推送上千帧（实测币安BTC约1424帧/秒），原样入库是每天2.48亿行、13.85GB，
+    不可行。而策略判定的是"这段时间里有没有碰到轨道"，只要保住区间内的最低买一和
+    最高卖一，信息就一点不少，数据量降到每天51.8万行。
+
+    这份数据交易所不提供历史下载，丢了无法重建；按天分区滚动清理，不要用DELETE。
+    """
+
+    __tablename__ = "market_quotes_second"
+    # 主键带上 bucket_time 是为了按天分区：MySQL 要求每个唯一键都包含分区表达式的列。
+    # 清理旧数据必须用 DROP PARTITION，DELETE 会留下大量碎片且不释放表空间。
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "bucket_time", name="uq_quote_second"),
+        Index("ix_quote_second_lookup", "instrument_id", "bucket_time"),
+        {"comment": "按秒聚合的盘口极值，用于研究分钟内的价格路径"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="记录主键ID"
+    )
+    bucket_time: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), primary_key=True, nullable=False, comment="该秒的起始时间UTC"
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id", ondelete="RESTRICT"), nullable=False, comment="关联品种ID"
+    )
+    bid_low: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该秒最低买一价"
+    )
+    bid_high: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该秒最高买一价"
+    )
+    ask_low: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该秒最低卖一价"
+    )
+    ask_high: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该秒最高卖一价"
+    )
+    frame_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="该秒收到的盘口帧数，骤降即连接异常"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="记录创建时间UTC"
+    )
+
+
+class MarketQuoteMinute(Base):
+    """按分钟聚合的买一卖一极值；由该分钟的秒级桶汇总而来，与秒级数据天然一致。
+
+    策略与回测查这一张：一天只有8640行，扫全天约50毫秒。秒级表只在需要
+    钻取"某一分钟内哪一秒最低"时才查。
+    """
+
+    __tablename__ = "market_quotes_minute"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "bucket_time", name="uq_quote_minute"),
+        Index("ix_quote_minute_lookup", "instrument_id", "bucket_time"),
+        {"comment": "按分钟聚合的盘口极值，供策略与回测使用"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="记录主键ID"
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id", ondelete="RESTRICT"), nullable=False, comment="关联品种ID"
+    )
+    bucket_time: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, comment="该分钟的起始时间UTC"
+    )
+    bid_low: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该分钟最低买一价"
+    )
+    bid_high: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该分钟最高买一价"
+    )
+    ask_low: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该分钟最低卖一价"
+    )
+    ask_high: Mapped[Decimal] = mapped_column(
+        Numeric(28, 12), nullable=False, comment="该分钟最高卖一价"
+    )
+    frame_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="该分钟收到的盘口帧数"
+    )
+    covered_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="该分钟实际有数据的秒数，小于60说明期间断过线"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="记录创建时间UTC"
+    )
+
+
 class MarketBar(Base):
     """标准化 OHLCV K 线；一条记录只代表一个已经识别的品种与周期。"""
 
