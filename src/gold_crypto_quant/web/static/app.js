@@ -101,6 +101,39 @@ async function loadOverview() {
   renderEquityChart(data);
 }
 
+// 盘口来自采集器写入的秒级聚合表，不是浏览器直连交易所——展示的是"最近一秒的极值"。
+// 每行显式给出数据年龄，采集器挂掉时页面必须看得出来，而不是继续显示几小时前的价格。
+function quoteSide(side){
+  if(!side) return `<span class="empty-state">无数据</span>`;
+  const stale = side.stale ? ` <span class="negative">⚠${side.age_seconds}s</span>` : "";
+  return `${money(side.bid)} / ${money(side.ask)}${stale}`;
+}
+async function loadQuotes(){
+  const data = await getJSON("/api/quotes");
+  const ages = data.quotes.flatMap(q => Object.values(q.venues).filter(Boolean).map(v => v.age_seconds));
+  const worst = ages.length ? Math.max(...ages) : null;
+  const badge = $("#quotes-age");
+  if(badge){
+    badge.textContent = worst === null ? "采集器无数据" : `数据延迟 ${worst.toFixed(1)} 秒`;
+    badge.classList.toggle("stale", worst === null || worst > 10);
+  }
+  const body = $("#quotes-table tbody");
+  if(!body) return;
+  body.innerHTML = data.quotes.map(q => {
+    const basis = q.basis === null
+      ? `<span class="empty-state">—</span>`
+      : `<strong class="${trendClass(q.basis)}">${q.basis >= 0 ? "+" : ""}${money(q.basis, 4)}</strong> <span class="${trendClass(q.basis)}">${pct(q.basis_rate)}</span>`;
+    const frames = Object.entries(q.venues)
+      .map(([label, side]) => `${esc(label)} ${side ? side.frame_count.toLocaleString("zh-CN") : "0"}`)
+      .join(" · ");
+    return `<tr><td><strong>${esc(q.symbol.replace("_USDT",""))}</strong></td>
+      <td>${quoteSide(q.venues["Gate"])}</td>
+      <td>${quoteSide(q.venues["币安"])}</td>
+      <td>${basis}</td>
+      <td><small>${frames}</small></td></tr>`;
+  }).join("");
+}
+
 let marketChart;
 async function loadMarket() {
   const venue = $("#market-venue")?.value, symbol = $("#market-symbol")?.value, interval = $("#market-interval")?.value;
@@ -144,7 +177,8 @@ document.addEventListener("DOMContentLoaded",()=>{
   if(page==="dashboard"){startPolling(loadOverview,10000);}
   if(page==="accounts"){startPolling(loadOverview,15000);}
   if(page==="market"){
-    startPolling(loadMarket,30000);
+    // 盘口每秒更新，K线30秒才变一次；合并成一个任务，按盘口的节奏刷新。
+    startPolling(async()=>{await Promise.all([loadMarket(),loadQuotes()]);},5000);
     $("#market-refresh").addEventListener("click",manual(loadMarket));
     ["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",manual(loadMarket)));
   }

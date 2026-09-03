@@ -21,6 +21,7 @@ from gold_crypto_quant.storage.models import (
     Instrument,
     MarketBar,
     MarketDataHealthState,
+    MarketQuoteSecond,
     ShadowEquitySnapshot,
     ShadowTradeEvent,
     TradingAccount,
@@ -29,6 +30,9 @@ from gold_crypto_quant.strategy.bollinger_range import (
     build_rotation_box_context,
     parameters_for_same_timeframe,
 )
+
+# 盘口面板固定展示这三个品种，与采集器和双行情服务保持一致。
+QUOTE_SYMBOLS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 
 VENUE_INFO = {
     GATE_LIVE_VENUE: {
@@ -255,6 +259,64 @@ def build_overview(engine: Engine, *, viewer: Any) -> dict[str, Any]:
         "live_trading": False,
         "order_submission": False,
     }
+
+
+def build_live_quotes(engine: Engine, *, stale_after_seconds: int = 10) -> dict:
+    """返回两个交易所三个品种的最新盘口，以及同一时刻的基差。
+
+    数据来自盘口采集器写入的秒级聚合表，不是浏览器直连交易所——因此页面上看到的
+    是"最近一秒的极值"，不是逐帧跳动。每行带上数据年龄，超过阈值即标记为陈旧，
+    避免采集器挂掉时页面还显示着几小时前的价格却看不出来。
+
+    基差是这套双所对照实验的关键观测量：2026-09-03 13:23 那一笔，
+    Gate 的 ETH 差 0.38 点没触到轨、币安穿了 0.41 点，两边就此分叉了 115U。
+    """
+    now = datetime.now(UTC)
+    rows = {}
+    with Session(engine) as session:
+        for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+            for symbol in QUOTE_SYMBOLS:
+                latest = session.execute(
+                    select(MarketQuoteSecond, Instrument.symbol, Instrument.venue)
+                    .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
+                    .where(Instrument.venue == venue, Instrument.symbol == symbol)
+                    .order_by(MarketQuoteSecond.bucket_time.desc())
+                    .limit(1)
+                ).first()
+                if latest is not None:
+                    rows[(venue, symbol)] = latest[0]
+
+    quotes = []
+    for symbol in QUOTE_SYMBOLS:
+        gate = rows.get((GATE_LIVE_VENUE, symbol))
+        binance = rows.get((BINANCE_LIVE_VENUE, symbol))
+        entry: dict = {"symbol": symbol, "venues": {}}
+        for label, record in (("Gate", gate), ("币安", binance)):
+            if record is None:
+                entry["venues"][label] = None
+                continue
+            age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
+            entry["venues"][label] = {
+                "bid": float(record.bid_high),
+                "ask": float(record.ask_low),
+                "bid_low": float(record.bid_low),
+                "ask_high": float(record.ask_high),
+                "frame_count": record.frame_count,
+                "age_seconds": round(age, 1),
+                "stale": age > stale_after_seconds,
+            }
+        gate_side = entry["venues"]["Gate"]
+        binance_side = entry["venues"]["币安"]
+        if gate_side and binance_side:
+            gate_mid = (gate_side["bid"] + gate_side["ask"]) / 2
+            binance_mid = (binance_side["bid"] + binance_side["ask"]) / 2
+            entry["basis"] = round(binance_mid - gate_mid, 4)
+            entry["basis_rate"] = (binance_mid - gate_mid) / gate_mid if gate_mid else 0.0
+        else:
+            entry["basis"] = None
+            entry["basis_rate"] = None
+        quotes.append(entry)
+    return {"generated_at": now.isoformat(), "quotes": quotes}
 
 
 def build_market_chart(

@@ -22,6 +22,7 @@ from gold_crypto_quant.storage.web_admin import (
     validate_password_strength,
 )
 from gold_crypto_quant.web.data import (
+    build_live_quotes,
     build_market_chart,
     build_overview,
     build_system_status,
@@ -269,6 +270,11 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/quotes")
+    def quotes_api(request: Request, _user=Depends(current_admin)):
+        # 盘口是公开行情，不含账户信息，因此不按 viewer 过滤。
+        return build_live_quotes(request.app.state.engine)
 
     @app.get("/api/trades")
     def trades_api(
