@@ -8,6 +8,9 @@ export LANG="en_US.UTF-8"
 export LC_ALL="en_US.UTF-8"
 export PYTHONUTF8="1"
 export PYTHONIOENCODING="utf-8"
+# 输出经管道交给 tee，Python 默认会块缓冲，日志要攒够几KB才吐一次。
+# 前台盯盘必须关掉缓冲，否则看到的不是实时。
+export PYTHONUNBUFFERED="1"
 
 exec .venv/bin/python main.py public-market-comparison \
   --limit 500 \

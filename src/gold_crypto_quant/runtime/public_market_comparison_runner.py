@@ -276,6 +276,7 @@ class PublicMarketComparisonRunner:
             while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
                 cycle_started = datetime.now(UTC)
                 feed_results: list[ComparisonFeedResult] = []
+                gate_started = datetime.now(UTC)
                 try:
                     gate_imports = import_gate_history(
                         gate,
@@ -302,7 +303,9 @@ class PublicMarketComparisonRunner:
                     self._report_feed_recovered("Gate")
                 except Exception as error:
                     self._report_feed_failure("Gate", error)
+                gate_seconds = (datetime.now(UTC) - gate_started).total_seconds()
 
+                binance_started = datetime.now(UTC)
                 try:
                     binance_imports = import_binance_history(
                         binance,
@@ -332,6 +335,7 @@ class PublicMarketComparisonRunner:
                     self._report_feed_recovered("币安")
                 except Exception as error:
                     self._report_feed_failure("币安", error)
+                binance_seconds = (datetime.now(UTC) - binance_started).total_seconds()
 
                 completed_cycles += 1
                 comparison_status_lines = self._comparison_status_lines(feed_results)
@@ -343,16 +347,24 @@ class PublicMarketComparisonRunner:
                         item.summary,
                         comparison_status_lines,
                     )
+                # 计时必须包含通知发送：钉钉和SMTP都是网络调用，属于本轮真实开销。
+                elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
+                timing = (
+                    f"耗时{elapsed:.1f}秒"
+                    f"（Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
+                    f" / 通知 {elapsed - gate_seconds - binance_seconds:.1f}）"
+                )
                 if feed_results:
                     details = "；".join(
                         f"{item.label}刷新{item.imported_bars}根、权益"
                         f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
                         for item in feed_results
                     )
-                    self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}")
+                    self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}；{timing}")
                 else:
-                    self.reporter(f"双行情对照第{completed_cycles}轮：两个行情源均失败")
-                elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
+                    self.reporter(
+                        f"双行情对照第{completed_cycles}轮：两个行情源均失败；{timing}"
+                    )
                 self._report_cycle_duration(elapsed)
                 self.stop_event.wait(max(0.1, self.poll_seconds - elapsed))
 
