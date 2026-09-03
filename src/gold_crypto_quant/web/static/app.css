@@ -69,3 +69,13 @@ button { cursor: pointer; }
 .quote-rows div { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
 .quote-rows span { color: var(--muted, #86868b); }
 .quote-rows strong { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* 直连交易所的实时价与采集器落库值并排：两者对不上或采集器停了都要一眼可见。 */
+.quote-direct { margin-bottom: 12px; }
+.quote-source { display: flex; align-items: baseline; gap: 8px; padding-top: 10px; border-top: 1px solid rgba(128,128,128,.18); font-size: 12px; }
+.quote-source span { color: var(--muted, #86868b); }
+.quote-source strong { font-variant-numeric: tabular-nums; }
+.quote-source em { margin-left: auto; font-style: normal; color: var(--muted, #86868b); }
+.quote-source em.stale { color: #ff453a; font-weight: 600; }
+.stream-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: #30d158; }
+.stream-dot.down { background: #ff453a; }

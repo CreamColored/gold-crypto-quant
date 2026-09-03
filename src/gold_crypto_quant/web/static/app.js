@@ -101,41 +101,116 @@ async function loadOverview() {
   renderEquityChart(data);
 }
 
-// 盘口来自采集器写入的秒级聚合表，不是浏览器直连交易所——展示的是"最近一秒的极值"。
-// 必须显式给出数据年龄：采集器停掉时页面要看得出来，而不是继续显示几小时前的价格。
-let lastQuoteMid = null;
+// 盘口分两路显示，缺一不可：
+//   直连交易所  —— 亚秒级跳动，看的是市场此刻的真实价格
+//   采集器落库  —— 带数据年龄，采集器停了必须看得出来
+// 只留直连的话页面会从"系统监控"退化成"价格显示器"：采集器挂掉时价格照样跳，
+// 而策略用的正是采集器那条链路，你会完全察觉不到。
+const QUOTE_WS = {
+  GATE_LIVE_PUBLIC: {
+    url: () => "wss://fx-ws.gateio.ws/v4/ws/usdt",
+    subscribe: (symbol) => ({time: Math.floor(Date.now()/1000), channel: "futures.book_ticker", event: "subscribe", payload: [symbol]}),
+    parse: (msg) => (msg.event === "update" && msg.result && msg.result.b)
+      ? {bid: Number(msg.result.b), ask: Number(msg.result.a)} : null,
+  },
+  BINANCE_LIVE_PUBLIC: {
+    url: (symbol) => `wss://fstream.binance.com/ws/${symbol.replace("_","").toLowerCase()}@bookTicker`,
+    subscribe: null,
+    parse: (msg) => msg && msg.b ? {bid: Number(msg.b), ask: Number(msg.a)} : null,
+  },
+};
+let quoteSocket = null, quoteFrames = 0, quoteLastMid = null, quoteRenderTimer = null, quoteRetry = 0;
+
+function quoteDigits(price){ return price >= 1000 ? 1 : 2; }
+
+function setStreamState(ok, text){
+  const element = $("#quote-stream-state");
+  if(element) element.innerHTML = `<span class="stream-dot ${ok ? "" : "down"}"></span>${esc(text)}`;
+}
+
+function renderDirect(bid, ask){
+  const box = $("#quote-direct");
+  if(!box) return;
+  const mid = (bid + ask) / 2, digits = quoteDigits(mid);
+  const direction = quoteLastMid === null ? 0 : mid - quoteLastMid;
+  quoteLastMid = mid;
+  box.innerHTML = `
+    <div class="quote-mid ${trendClass(direction)}">${money(mid, digits)}</div>
+    <div class="quote-rows">
+      <div><span>卖一</span><strong class="negative">${money(ask, digits)}</strong></div>
+      <div><span>买一</span><strong class="positive">${money(bid, digits)}</strong></div>
+      <div><span>价差</span><strong>${money(ask - bid, digits)}</strong></div>
+    </div>`;
+  const badge = $("#market-price");
+  if(badge) badge.textContent = money(mid, digits);
+}
+
+function stopQuoteStream(){
+  if(quoteRenderTimer){ window.clearInterval(quoteRenderTimer); quoteRenderTimer = null; }
+  if(quoteSocket){
+    // 先摘掉回调再关，避免主动切换品种时触发重连逻辑。
+    quoteSocket.onclose = quoteSocket.onerror = quoteSocket.onmessage = null;
+    try { quoteSocket.close(); } catch (error) { console.warn(error); }
+    quoteSocket = null;
+  }
+}
+
+function startQuoteStream(){
+  stopQuoteStream();
+  const venue = $("#market-venue")?.value, symbol = $("#market-symbol")?.value;
+  const config = QUOTE_WS[venue];
+  if(!config || !symbol) return;
+  quoteLastMid = null;
+  let pending = null;
+  setStreamState(false, "正在连接交易所…");
+  let socket;
+  try { socket = new WebSocket(config.url(symbol)); }
+  catch (error) { setStreamState(false, `无法连接：${error}`); return; }
+  quoteSocket = socket;
+
+  socket.onopen = () => {
+    quoteRetry = 0;
+    if(config.subscribe) socket.send(JSON.stringify(config.subscribe(symbol)));
+  };
+  socket.onmessage = (event) => {
+    let parsed;
+    try { parsed = config.parse(JSON.parse(event.data)); } catch { return; }
+    if(!parsed) return;
+    quoteFrames += 1;
+    pending = parsed;   // 每秒上百帧，攒着按固定节奏渲染，不能每帧都改DOM
+  };
+  socket.onclose = () => {
+    if(quoteSocket !== socket) return;   // 主动切换导致的关闭不重连
+    setStreamState(false, "连接断开，正在重连…");
+    quoteRetry += 1;
+    window.setTimeout(startQuoteStream, Math.min(1000 * 2 ** quoteRetry, 20000));
+  };
+  socket.onerror = () => setStreamState(false, "连接异常");
+
+  // 渲染与收帧解耦：币安每秒推数百帧，逐帧改DOM会让页面一直在重排。
+  quoteRenderTimer = window.setInterval(() => {
+    if(pending){ renderDirect(pending.bid, pending.ask); pending = null; }
+    setStreamState(true, `直连${venue === "GATE_LIVE_PUBLIC" ? "Gate" : "币安"} · ${quoteFrames} 帧/秒`);
+    quoteFrames = 0;
+  }, 1000);
+}
+
+// 采集器那一路仍然要查：它是策略实际使用的数据源，年龄涨上去就说明采集断了。
 async function loadQuotes(){
   const venue = $("#market-venue")?.value, symbol = $("#market-symbol")?.value;
   if(!venue || !symbol) return;
   const q = await getJSON(`/api/quotes?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}`);
-  const box = $("#quote-live"), ageLabel = $("#quote-age");
-  if(!box) return;
+  const value = $("#quote-collector"), age = $("#quote-age");
+  if(!value || !age) return;
   if(!q.available){
-    lastQuoteMid = null;
-    box.innerHTML = `<div class="empty-state">${esc(q.reason || "暂无盘口数据")}</div>`;
-    if(ageLabel) ageLabel.textContent = "采集器未运行";
+    value.textContent = "—";
+    age.textContent = "⚠ 采集器无数据";
+    age.classList.add("stale");
     return;
   }
-  // 与上一次相比的涨跌只用于给价格上色，不代表任何周期的涨跌幅。
-  const direction = lastQuoteMid === null ? 0 : q.mid - lastQuoteMid;
-  lastQuoteMid = q.mid;
-  const digits = q.mid >= 1000 ? 1 : 2;
-  if(ageLabel){
-    ageLabel.textContent = q.stale
-      ? `⚠ 数据已 ${q.age_seconds} 秒未更新`
-      : `延迟 ${q.age_seconds} 秒 · 本秒 ${q.frame_count.toLocaleString("zh-CN")} 帧`;
-    ageLabel.classList.toggle("stale", q.stale);
-  }
-  box.innerHTML = `
-    <div class="quote-mid ${trendClass(direction)}">${money(q.mid, digits)}</div>
-    <div class="quote-rows">
-      <div><span>卖一</span><strong class="negative">${money(q.ask, digits)}</strong></div>
-      <div><span>买一</span><strong class="positive">${money(q.bid, digits)}</strong></div>
-      <div><span>价差</span><strong>${money(q.spread, digits)}</strong></div>
-      <div><span>本秒区间</span><strong>${money(q.second_low, digits)} – ${money(q.second_high, digits)}</strong></div>
-    </div>`;
-  const badge = $("#market-price");
-  if(badge){ badge.textContent = money(q.mid, digits); badge.classList.toggle("stale", q.stale); }
+  value.textContent = money(q.mid, quoteDigits(q.mid));
+  age.textContent = q.stale ? `⚠ 已 ${q.age_seconds} 秒未更新` : `延迟 ${q.age_seconds} 秒 · ${q.frame_count.toLocaleString("zh-CN")} 帧`;
+  age.classList.toggle("stale", q.stale);
 }
 
 let marketChart;
@@ -144,7 +219,7 @@ async function loadMarket() {
   if (!venue) return;
   const data = await getJSON(`/api/market?venue=${encodeURIComponent(venue)}&symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`);
   $("#market-title").textContent = `${symbol.replace("_","/")} · ${data.exchange}`;
-  $("#market-subtitle").textContent = `${interval} · 已收盘K线 · 北京时间`;
+  $("#market-subtitle").textContent = `${interval} · 已收盘K线 · U本位永续 · 北京时间`;
   if (data.latest) $("#market-price").textContent = money(data.latest.close);
   const latest = data.latest;
   if (latest) {
@@ -190,9 +265,13 @@ document.addEventListener("DOMContentLoaded",()=>{
       tick += 1;
       await Promise.all(jobs);
     },2000);
-    const reloadBoth = manual(async()=>{ tick = 0; lastQuoteMid = null; await Promise.all([loadMarket(),loadQuotes()]); });
+    startQuoteStream();
+    const reloadBoth = manual(async()=>{ tick = 0; await Promise.all([loadMarket(),loadQuotes()]); });
     $("#market-refresh").addEventListener("click",reloadBoth);
-    ["#market-venue","#market-symbol","#market-interval"].forEach(s=>$(s).addEventListener("change",reloadBoth));
+    $("#market-interval").addEventListener("change",reloadBoth);
+    // 换交易所或品种要重连直连通道，否则会一直显示上一个品种的价格。
+    ["#market-venue","#market-symbol"].forEach(s=>$(s).addEventListener("change",()=>{ startQuoteStream(); reloadBoth(); }));
+    window.addEventListener("beforeunload", stopQuoteStream);
   }
   if(page==="trades"){
     const reload=manual(()=>loadTrades(1));

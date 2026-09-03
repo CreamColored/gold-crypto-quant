@@ -2,7 +2,7 @@
 {% block title %}实时行情 · Moon监管中心{% endblock %}
 {% block content %}
 <section class="page-heading compact-heading">
-  <div><p class="eyebrow">MARKET</p><h1>实时行情</h1><p>查看各交易所独立K线、布林带与震荡状态。</p></div>
+  <div><p class="eyebrow">MARKET</p><h1>实时行情</h1><p><strong>U本位永续合约</strong>（非现货）· 查看各交易所独立K线、布林带与震荡状态。</p></div>
 </section>
 <section class="toolbar panel">
   <label>交易所<select id="market-venue"><option value="GATE_LIVE_PUBLIC">Gate</option><option value="BINANCE_LIVE_PUBLIC">币安</option></select></label>
@@ -12,17 +12,25 @@
 </section>
 <section class="market-layout">
   <article class="panel chart-panel market-chart-panel">
-    <div class="panel-heading"><div><h2 id="market-title">ETH/USDT · Gate</h2><p id="market-subtitle">15分钟 · 已收盘K线</p></div><span id="market-price" class="price-badge">—</span></div>
+    <div class="panel-heading"><div><h2 id="market-title">ETH/USDT · Gate</h2><p id="market-subtitle">15分钟 · 已收盘K线 · U本位永续</p></div><span id="market-price" class="price-badge">—</span></div>
     <div id="market-chart" class="chart market"><div class="chart-placeholder">正在载入K线…</div></div>
   </article>
   <aside class="panel decision-panel">
-    <div class="panel-heading"><div><h2>实时盘口</h2><p id="quote-age">—</p></div></div>
-    <div id="quote-live" class="quote-live"><div class="empty-state">正在载入盘口…</div></div>
+    <div class="panel-heading"><div><h2>实时盘口 · 永续</h2><p id="quote-stream-state">正在连接交易所…</p></div></div>
+    <div id="quote-live" class="quote-live">
+      <div id="quote-direct" class="quote-direct"><div class="empty-state">等待交易所推送…</div></div>
+      <div class="quote-source">
+        <span>采集器</span>
+        <strong id="quote-collector">—</strong>
+        <em id="quote-age">—</em>
+      </div>
+    </div>
     <div class="panel-heading"><div><h2>策略观察</h2><p>只读判断，不提供操作按钮</p></div></div>
     <dl id="market-decision" class="decision-list">
       <div><dt>震荡判断</dt><dd>—</dd></div><div><dt>价格位置</dt><dd>—</dd></div><div><dt>上轨</dt><dd>—</dd></div><div><dt>中轨</dt><dd>—</dd></div><div><dt>下轨</dt><dd>—</dd></div>
     </dl>
     <div class="safety-banner"><span>只读</span><p>该页面不会向 Gate 或币安发送任何订单。</p></div>
+    <div class="safety-banner"><span>永续</span><p>价格取自 <strong>U本位永续合约</strong>，与交易所的<strong>现货</strong>页面存在基差，两者不应直接对照。核对请打开 Gate 的 <code>/futures/USDT/BTC_USDT</code> 或币安的 <code>/futures/BTCUSDT</code>。</p></div>
   </aside>
 </section>
 {% endblock %}
