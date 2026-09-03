@@ -40,6 +40,8 @@ class SymbolPaperPositionState:
 
     position_side: str = ""
     active_interval: str = ""
+    # 开仓时刻的ISO字符串，用于在平仓事件里给出持仓时长。
+    entry_time: str = ""
     quantity: float = 0.0
     remaining_quantity: float = 0.0
     entry_price: float = 0.0
@@ -270,6 +272,23 @@ STRUCTURE_MACD_HISTORY = 150
 # 顶底结构要覆盖的全部周期；做任何一个周期的震荡都要检查这七个。
 STRUCTURE_INTERVAL_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60}
 STRUCTURE_LADDER_STEP_POINTS = 8.0
+
+
+def _base_asset(symbol: str) -> str:
+    """取计价前的基础资产代码，用于在通知里标注数量单位。"""
+    return symbol.split("_", 1)[0]
+
+
+def _format_duration(delta: pd.Timedelta) -> str:
+    """把持仓时长渲染成中文短句；不足一分钟按分钟向上取整显示。"""
+    minutes = max(1, int(round(delta.total_seconds() / 60)))
+    if minutes < 60:
+        return f"{minutes}分钟"
+    hours, rest = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}小时{rest}分钟" if rest else f"{hours}小时"
+    days, rest_hours = divmod(hours, 24)
+    return f"{days}天{rest_hours}小时" if rest_hours else f"{days}天"
 
 
 def _ladder_step_points(bars: pd.DataFrame) -> float:
@@ -783,6 +802,7 @@ def run_multi_timeframe_paper_cycle(
         position = state.positions[symbol]
         position.position_side = side
         position.active_interval = interval
+        position.entry_time = timestamp.isoformat()
         position.entry_price = reference
         position.stop_price = (
             reference - parameters.fixed_stop_distance
@@ -833,15 +853,26 @@ def run_multi_timeframe_paper_cycle(
                 if middle_advance > 0
                 else f"预计到中轨杠杆收益{projected_return:.2%}，不足100%等中轨"
             )
+        stop_points = abs(reference - position.stop_price)
         add_event(
             timestamp,
             f"模拟开仓：{'买入做多' if side == 'LONG' else '卖出做空'}",
             symbol,
             interval,
             f"原因：{reason}",
+            f"订单动作：{'买入开多' if side == 'LONG' else '卖出开空'}",
             f"轨道限价：{reference:.2f}",
-            f"数量：{position.quantity:.6f} {symbol.split('_', 1)[0]}",
-            f"保护止损：{position.stop_price:.2f}",
+            f"数量：{position.quantity:.6f} {_base_asset(symbol)}",
+            f"名义价值：{reference * position.quantity:,.2f} USDT",
+            (
+                f"本单风险：{state.equity * risk_per_trade:.2f} USDT"
+                f"（账户{risk_per_trade:.2%}）"
+            ),
+            (
+                f"保护止损：{position.stop_price:.2f}"
+                f"（{stop_points:.2f}点 / {stop_points / reference:.2%}"
+                f" / 杠杆{stop_points / reference * PAPER_LEVERAGE:.0%}）"
+            ),
             f"中轨参考价：{middle_reference:.2f}",
             f"减仓触发价：{middle_trigger:.2f}（{reduction_rule}）",
             (
@@ -891,13 +922,34 @@ def run_multi_timeframe_paper_cycle(
         position.trade_net_pnl += net
         position.entry_fee_remaining -= allocated_entry_fee
         position.remaining_quantity -= quantity
+        closed_all = position.remaining_quantity <= 1e-12
+        going_long = position.position_side == "LONG"
+        move_points = fill - position.entry_price if going_long else position.entry_price - fill
+        share = quantity / position.quantity if position.quantity else 0.0
+        base = _base_asset(symbol)
+        held = ""
+        if position.entry_time:
+            held = _format_duration(timestamp - pd.Timestamp(position.entry_time))
         add_event(
             timestamp,
-            f"模拟{'减仓' if position.remaining_quantity > 1e-12 else '平仓'}：{reason}",
+            f"模拟{'平仓' if closed_all else '减仓'}：{reason}",
             symbol,
             interval,
-            f"方向：{position.position_side}",
+            f"订单动作：{'卖出平多' if going_long else '买入平空'}",
             f"成交参考价：{fill:.2f}",
+            f"成交数量：{quantity:.6f} {base}（占原仓位{share:.0%}）",
+            f"名义价值：{fill * quantity:,.2f} USDT",
+            f"开仓价：{position.entry_price:.2f}",
+            (
+                f"价差：{move_points:+.2f}点 / {move_points / position.entry_price:+.2%}"
+                f" / 杠杆{move_points / position.entry_price * PAPER_LEVERAGE:+.1%}"
+            ),
+            *((f"持仓时长：{held}",) if held else ()),
+            (
+                "剩余仓位：已全部了结"
+                if closed_all
+                else f"剩余仓位：{position.remaining_quantity:.6f} {base}"
+            ),
             f"本次净盈亏：{net:+.2f} USDT",
             f"整笔累计净盈亏：{position.trade_net_pnl:+.2f} USDT",
             f"影子权益：{state.equity:.2f} USDT",

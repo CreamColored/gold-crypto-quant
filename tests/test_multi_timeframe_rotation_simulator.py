@@ -11,7 +11,9 @@ from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     INTERVAL_PRIORITY,
     STRUCTURE_INTERVAL_MINUTES,
     _bands_are_opening,
+    _base_asset,
     _block_symbol_after_stop,
+    _format_duration,
     _has_bottom_structure,
     _has_top_structure,
     _ladder_step_points,
@@ -641,6 +643,22 @@ def test_structure_needs_enough_history_for_macd() -> None:
 
     assert _has_top_structure(short) is False
     assert _has_bottom_structure(short) is False
+
+
+def test_duration_renders_for_phone_notifications() -> None:
+    """持仓时长要在钉钉里一眼可读；不足一分钟按一分钟显示，不出现0分钟。"""
+    assert _format_duration(pd.Timedelta(seconds=20)) == "1分钟"
+    assert _format_duration(pd.Timedelta(minutes=6)) == "6分钟"
+    assert _format_duration(pd.Timedelta(minutes=60)) == "1小时"
+    assert _format_duration(pd.Timedelta(minutes=92)) == "1小时32分钟"
+    assert _format_duration(pd.Timedelta(hours=25)) == "1天1小时"
+    assert _format_duration(pd.Timedelta(days=2)) == "2天"
+
+
+def test_base_asset_labels_quantity_units() -> None:
+    """成交数量要标出基础资产，避免把BTC数量误读成USDT金额。"""
+    assert _base_asset("BTC_USDT") == "BTC"
+    assert _base_asset("XAU_USDT") == "XAU"
 
 
 def test_structure_covers_all_seven_intervals() -> None:
