@@ -1,6 +1,7 @@
 """Gate与币安实盘公共行情双影子账户七天对照服务。"""
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -113,6 +114,36 @@ class PublicMarketComparisonRunner:
                 "交易所订单提交：False",
             ),
         )
+
+    def _run_feed(self, label: str, fetch, venue: str, state_path: Path) -> tuple:
+        """跑完一个交易所的完整流水线：拉行情、健康检查、策略、落库。
+
+        两个交易所之间没有任何共享可变状态——不同的 instrument、不同的影子账户
+        状态文件、不同的监管表行——因此可以并行。策略那一步在 venue 内部仍然串行：
+        三个品种共享同一份 equity、跨品种顺序由 symbols.index() 定死、
+        整份状态文件原子替换，按品种拆线程会直接产生竞态。
+        """
+        started = datetime.now(UTC)
+        result: ComparisonFeedResult | None = None
+        try:
+            imports = fetch()
+            self._refresh_health(venue)
+            summary = run_bollinger_signal_cycle(
+                symbols=PUBLIC_COMPARISON_CONTRACTS,
+                venue=venue,
+                state_path=state_path,
+            )
+            result = ComparisonFeedResult(
+                label,
+                sum(item.stored for item in imports),
+                summary,
+            )
+            # 保存该交易所独立的影子权益与交易事件，Web后台只读这些监管数据。
+            record_shadow_cycle(venue, state_path, summary)
+            self._report_feed_recovered(label)
+        except Exception as error:  # noqa: BLE001 - 一个交易所失败不能带停另一个
+            self._report_feed_failure(label, error)
+        return result, (datetime.now(UTC) - started).total_seconds()
 
     def _report_cycle_duration(self, elapsed: float) -> None:
         """单轮耗时超过轮询间隔即告警，持续超时按冷却期节流，回落后发恢复通知。"""
@@ -275,67 +306,37 @@ class PublicMarketComparisonRunner:
         with GatePublicClient() as gate, BinancePublicClient() as binance:
             while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
                 cycle_started = datetime.now(UTC)
-                feed_results: list[ComparisonFeedResult] = []
-                gate_started = datetime.now(UTC)
-                try:
-                    gate_imports = import_gate_history(
-                        gate,
-                        contracts=PUBLIC_COMPARISON_CONTRACTS,
-                        intervals=PUBLIC_COMPARISON_INTERVALS,
-                        limit=self.limit,
-                        venue=GATE_LIVE_VENUE,
+                # 两个交易所并行；HTTP往返占单轮近四成，串行等于白白多等一份。
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="feed") as pool:
+                    gate_future = pool.submit(
+                        self._run_feed,
+                        "Gate",
+                        lambda: import_gate_history(
+                            gate,
+                            contracts=PUBLIC_COMPARISON_CONTRACTS,
+                            intervals=PUBLIC_COMPARISON_INTERVALS,
+                            limit=self.limit,
+                            venue=GATE_LIVE_VENUE,
+                        ),
+                        GATE_LIVE_VENUE,
+                        GATE_LIVE_STATE_PATH,
                     )
-                    self._refresh_health(GATE_LIVE_VENUE)
-                    gate_summary = run_bollinger_signal_cycle(
-                        symbols=PUBLIC_COMPARISON_CONTRACTS,
-                        venue=GATE_LIVE_VENUE,
-                        state_path=GATE_LIVE_STATE_PATH,
-                    )
-                    feed_results.append(
-                        ComparisonFeedResult(
-                            "Gate",
-                            sum(item.stored for item in gate_imports),
-                            gate_summary,
-                        )
-                    )
-                    # 保存独立Gate影子权益与交易事件，Web后台只读这些监管数据。
-                    record_shadow_cycle(GATE_LIVE_VENUE, GATE_LIVE_STATE_PATH, gate_summary)
-                    self._report_feed_recovered("Gate")
-                except Exception as error:
-                    self._report_feed_failure("Gate", error)
-                gate_seconds = (datetime.now(UTC) - gate_started).total_seconds()
-
-                binance_started = datetime.now(UTC)
-                try:
-                    binance_imports = import_binance_history(
-                        binance,
-                        contracts=PUBLIC_COMPARISON_CONTRACTS,
-                        intervals=PUBLIC_COMPARISON_INTERVALS,
-                        limit=self.limit,
-                    )
-                    self._refresh_health(BINANCE_LIVE_VENUE)
-                    binance_summary = run_bollinger_signal_cycle(
-                        symbols=PUBLIC_COMPARISON_CONTRACTS,
-                        venue=BINANCE_LIVE_VENUE,
-                        state_path=BINANCE_LIVE_STATE_PATH,
-                    )
-                    feed_results.append(
-                        ComparisonFeedResult(
-                            "币安",
-                            sum(item.stored for item in binance_imports),
-                            binance_summary,
-                        )
-                    )
-                    # 保存独立币安影子权益与交易事件，账户和Gate完全隔离。
-                    record_shadow_cycle(
+                    binance_future = pool.submit(
+                        self._run_feed,
+                        "币安",
+                        lambda: import_binance_history(
+                            binance,
+                            contracts=PUBLIC_COMPARISON_CONTRACTS,
+                            intervals=PUBLIC_COMPARISON_INTERVALS,
+                            limit=self.limit,
+                        ),
                         BINANCE_LIVE_VENUE,
                         BINANCE_LIVE_STATE_PATH,
-                        binance_summary,
                     )
-                    self._report_feed_recovered("币安")
-                except Exception as error:
-                    self._report_feed_failure("币安", error)
-                binance_seconds = (datetime.now(UTC) - binance_started).total_seconds()
+                    gate_result, gate_seconds = gate_future.result()
+                    binance_result, binance_seconds = binance_future.result()
+                # 顺序固定为 Gate 在前，摘要与权益差的口径不随线程完成先后变化。
+                feed_results = [item for item in (gate_result, binance_result) if item is not None]
 
                 completed_cycles += 1
                 comparison_status_lines = self._comparison_status_lines(feed_results)
@@ -349,10 +350,11 @@ class PublicMarketComparisonRunner:
                     )
                 # 计时必须包含通知发送：钉钉和SMTP都是网络调用，属于本轮真实开销。
                 elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
+                # 两个交易所并行，各自耗时会重叠，因此总耗时不等于两者相加。
                 timing = (
                     f"耗时{elapsed:.1f}秒"
-                    f"（Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
-                    f" / 通知 {elapsed - gate_seconds - binance_seconds:.1f}）"
+                    f"（并行：Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
+                    f"，通知 {elapsed - max(gate_seconds, binance_seconds):.1f}）"
                 )
                 if feed_results:
                     details = "；".join(

@@ -3,6 +3,7 @@
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
+from threading import Lock
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -40,6 +41,9 @@ class RuntimeEventNotifier:
         self.settings = settings
         # 推送失败不能影响交易主流程，但必须在日志里留痕；静默吞掉会让通道坏了都没人知道。
         self.reporter = reporter or (lambda _message: None)
+        # 双行情服务并行跑两个交易所时共用本对象：_sent_keys 去重、钉钉滑动窗口限流
+        # 和邮件游标都是读改写，必须串行化，否则限流可能被同时放行而触发平台封禁。
+        self._lock = Lock()
         self.enabled = bool(settings.status_email_to)
         self._sent_keys: set[str] = set()
         # 服务重启时从当前最大成交开始，只通知本次运行后产生的新成交。
@@ -103,6 +107,33 @@ class RuntimeEventNotifier:
         钉钉与邮件是两条独立通道：邮件未配置时钉钉照常推送，反之亦然。
         category为TRADE的行情交易明细只推钉钉，不进邮箱；返回值表示邮件是否发出。
         """
+        with self._lock:
+            return self._send_locked(
+                event_key=event_key,
+                event_title=event_title,
+                event_lines=event_lines,
+                severity=severity,
+                now=now,
+                repeatable=repeatable,
+                venue=venue,
+                comparison_status_lines=comparison_status_lines,
+                category=category,
+            )
+
+    def _send_locked(
+        self,
+        *,
+        event_key: str,
+        event_title: str,
+        event_lines: tuple[str, ...],
+        severity: str,
+        now: datetime | None,
+        repeatable: bool,
+        venue: str | None,
+        comparison_status_lines: tuple[str, ...] | None,
+        category: str,
+    ) -> bool:
+        """send() 的实际实现；调用方必须已持有 _lock。"""
         if not repeatable and event_key in self._sent_keys:
             return False
         now = now or datetime.now(UTC)

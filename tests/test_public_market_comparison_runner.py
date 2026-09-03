@@ -148,3 +148,60 @@ def test_status_lines_mark_missing_feed_for_both_equity_and_holdings() -> None:
 
     assert "币安影子账户：本轮行情异常" in lines
     assert "币安持仓：本轮行情异常" in lines
+
+
+def test_feed_pipeline_is_isolated_per_venue() -> None:
+    """两个交易所的流水线不能共用任何可变入参，否则并行会互相污染。
+
+    _run_feed 的每个参数都是该交易所专属的：拉取闭包、venue、状态文件路径。
+    这个断言锁住"状态文件必须不同"——同一个路径会让两个线程互相覆盖影子账户。
+    """
+    from gold_crypto_quant.runtime.public_market_comparison_runner import (
+        BINANCE_LIVE_STATE_PATH,
+        GATE_LIVE_STATE_PATH,
+    )
+
+    assert GATE_LIVE_STATE_PATH != BINANCE_LIVE_STATE_PATH
+
+
+def test_notifier_serialises_concurrent_sends(monkeypatch) -> None:
+    """并行时两个交易所共用一个通知器，去重与限流都是读改写，必须串行化。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pydantic import SecretStr
+
+    from gold_crypto_quant.config import Settings
+    from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
+
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.latest_paper_trade_id",
+        lambda: 0,
+    )
+    settings = Settings(
+        status_email_to="",
+        dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=token",
+        dingtalk_secret=SecretStr("SECdeadbeef"),
+    )
+    notifier = RuntimeEventNotifier(settings)
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        notifier, "_push_dingtalk", lambda **kwargs: pushed.append(kwargs["event_title"])
+    )
+
+    # 同一个不可重复事件被两个线程同时发送，只能有一个真正推送出去。
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [
+            future.result()
+            for future in [
+                pool.submit(
+                    notifier.send,
+                    event_key="runtime:SERVICE_STARTED",
+                    event_title="服务启动",
+                    event_lines=("详情：并发测试",),
+                )
+                for _ in range(2)
+            ]
+        ]
+
+    assert len(pushed) == 1
+    assert results == [False, False]

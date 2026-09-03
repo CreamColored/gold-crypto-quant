@@ -91,6 +91,13 @@ pytest
 `scripts/run-public-market-comparison-7d.command`（Web后台是同目录的 `run-web-ui.command`），
 改参数直接改脚本里的 `--poll-seconds`。
 
+**两个交易所并行拉取。** Gate 和币安的整条流水线（拉行情、健康检查、策略、落库）互不共享
+可变状态——不同的 instrument、不同的影子账户状态文件、不同的监管表行——因此各跑一个线程，
+单轮从 9.2 秒降到 4.4 秒。**策略那一步在 venue 内部仍然串行**，不能按品种拆：三个品种共享
+同一份 equity、跨品种顺序由 `symbols.index()` 定死、整份状态文件原子替换，按品种拆线程会
+直接产生竞态。两个线程共用一个 `RuntimeEventNotifier`，其去重集合与钉钉滑动窗口限流都是
+读改写，已用锁串行化——限流若被同时放行会触发平台封禁机器人10分钟。
+
 **双行情服务按前台运行**，Terminal 里能看到实时日志，关掉窗口即停止；Web 后台常驻即可。
 脚本里设了 `PYTHONUNBUFFERED=1`——输出经管道交给 `tee`，Python 默认块缓冲会攒够几KB才吐，
 不关缓冲看到的就不是实时。
