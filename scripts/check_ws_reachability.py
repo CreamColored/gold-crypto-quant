@@ -36,7 +36,7 @@ def http_get(url: str, timeout: float = 15.0) -> tuple:
     request = urllib.request.Request(url, headers={"User-Agent": "ws-probe/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read(200).decode("utf-8", "replace")
+            return response.status, response.read(2000).decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
         # 401/403/404 是服务端给出的应答，网络层面是通的——判断可达性时必须算通，
         # 否则不带密钥探测 Anthropic 会被误判成"连不上"。
@@ -46,16 +46,43 @@ def http_get(url: str, timeout: float = 15.0) -> tuple:
 
 
 def show_exit() -> None:
-    """报告当前出口IP与所在国家，用于和其他机器对照。"""
+    """报告出口IP，并向多家地理库查询归属地。
+
+    "台湾广播IP、机器在香港"这类情况下各家判定经常不一致：地理库的依据分别是
+    RIR注册信息、BGP宣告来源和实测时延推断，取舍不同结论就不同。多查几家才能
+    看出分歧有多大——而真正决定服务能否使用的是各服务商自己的库，无法从外部推断。
+    """
     status, body = http_get("https://www.cloudflare.com/cdn-cgi/trace")
-    if status != 200:
+    address = "?"
+    if status == 200:
+        fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+        address = fields.get("ip", "?")
+        print(f"出口 IP {address}")
+        print(
+            f"  {'Cloudflare':14s} 国家 {fields.get('loc', '?'):4s}"
+            f"  入口机房 {fields.get('colo', '?')}"
+        )
+    else:
         print(f"出口信息取不到：{body}")
         return
-    fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
-    print(
-        f"出口 IP {fields.get('ip', '?')}    国家 {fields.get('loc', '?')}    "
-        f"入口机房 {fields.get('colo', '?')}"
-    )
+
+    for label, url, keys in (
+        ("ip-api.com", "http://ip-api.com/json/?fields=countryCode,regionName,city,isp,as",
+         ("countryCode", "regionName", "city", "isp")),
+        ("ipinfo.io", "https://ipinfo.io/json", ("country", "region", "city", "org")),
+    ):
+        code, payload = http_get(url)
+        if code != 200:
+            print(f"  {label:14s} 查询失败（HTTP {code}）")
+            continue
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            print(f"  {label:14s} 返回不是JSON")
+            continue
+        parts = [str(data.get(key, "?")) for key in keys]
+        print(f"  {label:14s} 国家 {parts[0]:4s}  {' / '.join(parts[1:])}")
+    print("  注意：各服务商用自己的地理库，上面一致不代表 Claude 或交易所也这么判。")
 
 
 def check_claude() -> None:
