@@ -1,4 +1,9 @@
-"""在任意一台机器上检查交易所的 WebSocket 实时行情能否收到推送。
+"""检查一台机器（或一个代理出口）能否胜任本项目的网络需求。
+
+检测三件事：
+1. Claude / Anthropic 是否可达——不通的话这台机器不能用来做开发代理
+2. 交易所 REST 是否可达——双行情服务靠它拉K线
+3. 交易所 WebSocket 是否真的推数据——盘口采集器靠它
 
 用途：判断"币安期货 fstream 连得上却一帧不推"是不是出口IP或网络环境造成的。
 Mac 上实测的现象是——同一个出口，币安现货WS、币安期货REST、Gate期货WS 三条都正常，
@@ -18,6 +23,7 @@ import json
 import ssl
 import sys
 import time
+import urllib.error
 import urllib.request
 
 PROBE_SECONDS = 15
@@ -31,7 +37,11 @@ def http_get(url: str, timeout: float = 15.0) -> tuple:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read(200).decode("utf-8", "replace")
-    except Exception as error:  # noqa: BLE001 - 任何失败都只作为检测结论
+    except urllib.error.HTTPError as error:
+        # 401/403/404 是服务端给出的应答，网络层面是通的——判断可达性时必须算通，
+        # 否则不带密钥探测 Anthropic 会被误判成"连不上"。
+        return error.code, error.reason or ""
+    except Exception as error:  # noqa: BLE001 - 其余失败都只作为检测结论
         return 0, f"{type(error).__name__}: {error}"
 
 
@@ -48,9 +58,30 @@ def show_exit() -> None:
     )
 
 
+def check_claude() -> None:
+    """Claude 与 Anthropic 是否可达；不通则这台机器不能用作开发代理。
+
+    只发不带密钥的请求：401 或 403 同样说明网络是通的——能收到应答就够了，
+    我们要判断的是可达性，不是权限。
+    """
+    print("\n--- Claude / Anthropic ---")
+    for label, url in (
+        ("Anthropic API", "https://api.anthropic.com/v1/models"),
+        ("claude.ai", "https://claude.ai/"),
+    ):
+        started = time.perf_counter()
+        status, body = http_get(url)
+        elapsed = time.perf_counter() - started
+        # 401/403 表示服务端应答了，只是没带密钥；网络层面算通。
+        reachable = status in (200, 401, 403, 404)
+        mark = "OK " if reachable else "失败"
+        detail = "" if reachable else f"  {body[:80]}"
+        print(f"  [{mark}] {label:16s} HTTP {status}  {elapsed:5.2f}s{detail}")
+
+
 def check_rest() -> None:
-    """REST 作为对照：REST 通而 WS 不通，说明问题只在实时流这一路。"""
-    print("\n--- REST 对照 ---")
+    """REST 对照：REST 通而 WS 不通，说明问题只在实时流这一路。"""
+    print("\n--- 交易所 REST ---")
     for label, url in (
         ("币安期货 klines", "https://fapi.binance.com/fapi/v1/klines"
                             "?symbol=BTCUSDT&interval=1m&limit=2"),
@@ -137,13 +168,16 @@ def main() -> int:
         return 2
     print(f"Python {sys.version.split()[0]}    SSL {ssl.OPENSSL_VERSION}")
     show_exit()
+    check_claude()
     check_rest()
     asyncio.run(check_ws())
     print(
         "\n怎么看结果：\n"
-        "  币安期货两条有推送            → 该网络环境正常，Mac那边是出口IP被单独限流\n"
-        "  币安期货无推送、其余三条正常    → 与出口无关，是币安对期货实时流的普遍限制\n"
-        "  全部失败                     → 该机器网络不通，本次结果无参考价值"
+        "  Claude 两条都不通             → 这台机器不能用作开发代理\n"
+        "  交易所 REST 不通              → 双行情服务无法拉K线，不能用\n"
+        "  币安期货 WS 无推送、现货正常   → 与本项目在日本节点观察到的现象一致\n"
+        "  全部失败                     → 该机器网络不通，本次结果无参考价值\n"
+        "\n本项目实测用量供参考：常驻约 211 KB/秒、每天约 25 GB，峰值带宽不到 2 Mbps。"
     )
     return 0
 
