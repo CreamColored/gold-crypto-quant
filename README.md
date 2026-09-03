@@ -91,12 +91,18 @@ pytest
 `scripts/run-public-market-comparison-7d.command`（Web后台是同目录的 `run-web-ui.command`），
 改参数直接改脚本里的 `--poll-seconds`。
 
-**单轮耗时超过 `--poll-seconds` 会立即告警。** 超时后循环里的
+**单轮耗时连续超过 `--poll-seconds` 会告警。** 超时后循环里的
 `wait(max(0.1, poll_seconds - elapsed))` 会退化成只等0.1秒，服务表面正常、实际在背靠背空转——
-2026-09-03 之前它就以119秒的间隔跑了好几天没被发现。持续超时按30分钟冷却期节流
-（`CYCLE_OVERRUN_ALERT_COOLDOWN`），回落到间隔内再发一次恢复通知；无论告警是否被节流，
-日志每轮都会记一行，便于回溯超时从哪一轮开始。判定逻辑在 `CycleDurationWatch`，
-不碰 I/O，可独立测试。
+2026-09-03 之前它就以119秒的间隔跑了好几天没被发现。
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `CYCLE_OVERRUN_ALERT_STREAK` | 3 | 连续超时满3轮才告警，偶发一两轮变慢不打扰 |
+| `CYCLE_OVERRUN_ALERT_COOLDOWN` | 15 分钟 | 持续超时的重复告警间隔 |
+
+中间只要恢复一轮，连续计数就清零。回落到间隔内会发一次恢复通知，但**只在本次确实告过警时才发**，
+不会出现没报过故障却报恢复。无论告警是否被节流，日志每轮都会记一行，便于回溯超时从哪一轮开始。
+判定逻辑在 `CycleDurationWatch`，不碰 I/O，可独立测试。
 
 数据库连接使用 `mysql+pymysql`，字符集统一为 `utf8mb4`，应用和数据库时间统一使用
 UTC。当前仓库按用户明确决定跟踪 `.env`；该文件含明文密钥，不得公开分享仓库或日志。

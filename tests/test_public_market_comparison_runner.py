@@ -22,37 +22,55 @@ def test_cycle_within_poll_interval_stays_silent() -> None:
     assert watch.streak == 0
 
 
-def test_first_overrun_alerts_immediately() -> None:
-    """一超出轮询间隔就要告警——循环此时已经退化成只等0.1秒。"""
+def test_isolated_slow_cycles_do_not_alert() -> None:
+    """偶发一两轮变慢不告警——网络抖动和交易所响应慢不值得打扰。"""
     watch = CycleDurationWatch(poll_seconds=20.0)
 
-    assert watch.observe(119.0, START) == "overrun"
-    assert watch.streak == 1
+    assert watch.observe(119.0, START) == ""
+    assert watch.observe(119.0, START + timedelta(seconds=120)) == ""
+    assert watch.streak == 2
+    # 中间恢复一轮就清零，之后再慢两轮同样不告警。
+    assert watch.observe(9.0, START + timedelta(seconds=140)) == ""
+    assert watch.streak == 0
+    assert watch.observe(119.0, START + timedelta(seconds=160)) == ""
+
+
+def test_third_consecutive_overrun_alerts() -> None:
+    """连续第三轮超时才告警，此时轮询节奏确实已经丢了。"""
+    watch = CycleDurationWatch(poll_seconds=20.0)
+
+    assert watch.observe(119.0, START) == ""
+    assert watch.observe(119.0, START + timedelta(seconds=120)) == ""
+    assert watch.observe(119.0, START + timedelta(seconds=240)) == "overrun"
+    assert watch.streak == 3
 
 
 def test_sustained_overrun_is_throttled_by_cooldown() -> None:
-    """持续超时按冷却期节流，不能每轮都发；冷却期满后再发一次。"""
-    watch = CycleDurationWatch(poll_seconds=20.0, cooldown=timedelta(minutes=30))
+    """持续超时按15分钟冷却期节流，不能每轮都发；冷却期满后再发一次。"""
+    watch = CycleDurationWatch(poll_seconds=20.0, cooldown=timedelta(minutes=15))
+    for offset in (0, 2, 4):
+        watch.observe(119.0, START + timedelta(minutes=offset))
+    assert watch.last_alert == START + timedelta(minutes=4)
 
-    assert watch.observe(119.0, START) == "overrun"
-    # 冷却期内无论超时多少轮都只记账、不告警。
-    for minute in (1, 5, 15, 29):
+    for minute in (5, 10, 18):
         assert watch.observe(119.0, START + timedelta(minutes=minute)) == ""
-    assert watch.streak == 5
-    assert watch.observe(119.0, START + timedelta(minutes=30)) == "overrun"
-    assert watch.streak == 6
+    assert watch.observe(119.0, START + timedelta(minutes=19)) == "overrun"
 
 
-def test_recovery_notifies_once_then_resets() -> None:
-    """回落到间隔内发一次恢复通知，之后保持安静；再次超时重新立即告警。"""
-    watch = CycleDurationWatch(poll_seconds=20.0)
-    watch.observe(119.0, START)
+def test_recovery_only_notifies_when_an_alert_was_sent() -> None:
+    """没告过警就不该报恢复；告过警的才发一次恢复通知并重置。"""
+    quiet = CycleDurationWatch(poll_seconds=20.0)
+    quiet.observe(119.0, START)
+    quiet.observe(119.0, START + timedelta(minutes=1))
+    # 只慢了两轮、从未告警，恢复时保持安静。
+    assert quiet.observe(9.0, START + timedelta(minutes=2)) == ""
 
-    assert watch.observe(9.0, START + timedelta(minutes=1)) == "recovered"
-    assert watch.streak == 0
-    assert watch.observe(9.0, START + timedelta(minutes=2)) == ""
-    # 恢复时清掉了冷却计时，所以下一次超时不受上一轮告警时间的压制。
-    assert watch.observe(119.0, START + timedelta(minutes=3)) == "overrun"
+    alerted = CycleDurationWatch(poll_seconds=20.0)
+    for offset in (0, 1, 2):
+        alerted.observe(119.0, START + timedelta(minutes=offset))
+    assert alerted.observe(9.0, START + timedelta(minutes=3)) == "recovered"
+    assert alerted.streak == 0
+    assert alerted.observe(9.0, START + timedelta(minutes=4)) == ""
 
 
 def test_equal_to_poll_interval_is_not_an_overrun() -> None:
