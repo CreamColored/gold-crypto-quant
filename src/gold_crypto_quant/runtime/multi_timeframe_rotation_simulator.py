@@ -56,6 +56,10 @@ class SymbolPaperPositionState:
     trend_ride_next_trigger_price: float = 0.0
     # 该笔交易实际使用的阶梯步长；ETH为8点，BTC等高价品种按价格比例放大。
     trend_ride_step_points: float = 0.0
+    # 止损阶梯依次落在：开仓价 → 开仓时中轨 → 开仓时对侧轨 → 上一次减仓价。
+    entry_opposite_band: float = 0.0
+    trend_ride_last_reduce_price: float = 0.0
+    trend_ride_steps_done: int = 0
     middle_advance_distance: float = 0.0
 
 
@@ -254,15 +258,17 @@ def _bands_are_opening(context: pd.DataFrame, position: int) -> bool:
     )
 
 
-# 顶/底结构按MACD背离判定：价格创新高但DIF更低为顶背离，价格创新低但DIF更高为底背离。
+# 顶/底结构按MACD红绿柱分组比较：
+#   顶部结构＝本组红柱区收盘价更高、但DIF更低，在红柱区结束（柱值转负）那根K线确认；
+#   底部结构＝本组绿柱区收盘价更低、但DIF更高，在绿柱区结束（柱值转正）那根K线确认。
+# 判定是离散的——只在柱区刚结束时成立一次，不是每根K线都重复判定。
 STRUCTURE_MACD_FAST = 12
 STRUCTURE_MACD_SLOW = 26
+STRUCTURE_MACD_SIGNAL = 9
 # 计算MACD需要足够长的历史，取150根让EMA26充分收敛。
 STRUCTURE_MACD_HISTORY = 150
-# 在最近40根已收盘K线里寻找两个摆动高/低点做背离比较。
-STRUCTURE_SWING_WINDOW = 40
-# 摆动点需左右各2根确认；右侧确认意味着最近2根不参与判定，这是必要的延迟而非未来数据。
-STRUCTURE_SWING_CONFIRM = 2
+# 顶底结构要覆盖的全部周期；做任何一个周期的震荡都要检查这七个。
+STRUCTURE_INTERVAL_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60}
 STRUCTURE_LADDER_STEP_POINTS = 8.0
 
 
@@ -291,69 +297,83 @@ def _closed_bars_before(
     return bars.loc[available].tail(lookback)
 
 
-def _macd_dif(bars: pd.DataFrame) -> pd.Series:
-    """按标准MACD(12,26)计算DIF快线，用于顶底背离判定。"""
+def _macd_frame(bars: pd.DataFrame) -> tuple:
+    """按标准MACD(12,26,9)返回收盘价、DIF与柱值三条序列。"""
     close = pd.to_numeric(bars["close"], errors="raise").astype(float)
     fast = close.ewm(span=STRUCTURE_MACD_FAST, adjust=False).mean()
     slow = close.ewm(span=STRUCTURE_MACD_SLOW, adjust=False).mean()
-    return fast - slow
+    dif = fast - slow
+    dea = dif.ewm(span=STRUCTURE_MACD_SIGNAL, adjust=False).mean()
+    return close.to_numpy(), dif.to_numpy(), ((dif - dea) * 2).to_numpy()
 
 
-def _swing_positions(values, *, high: bool) -> list[int]:
-    """返回左右各STRUCTURE_SWING_CONFIRM根都不更极端的摆动点下标。"""
-    confirm = STRUCTURE_SWING_CONFIRM
-    found: list[int] = []
-    for index in range(confirm, len(values) - confirm):
-        window = values[index - confirm : index + confirm + 1]
-        pivot = values[index]
-        if high and pivot >= window.max() and pivot > window[0]:
-            found.append(index)
-        elif not high and pivot <= window.min() and pivot < window[0]:
-            found.append(index)
-    return found
+def _histogram_groups(histogram, *, positive: bool) -> list[tuple[int, int]]:
+    """把MACD柱按符号切成连续的红柱区或绿柱区，返回每段的[起,止]下标。"""
+    groups: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(histogram):
+        matches = value > 0 if positive else value < 0
+        if matches and start is None:
+            start = index
+        elif not matches and start is not None:
+            groups.append((start, index - 1))
+            start = None
+    if start is not None:
+        groups.append((start, len(histogram) - 1))
+    return groups
+
+
+def _structure_confirmed(bars: pd.DataFrame, *, top: bool) -> bool:
+    """判断顶/底结构此刻是否处于生效状态。
+
+    顶部结构在死叉那根K线成立：本组红柱区最高收盘价高于上一组，但组内DIF最大值反而更低。
+    成立后一直有效，直到再次金叉才消失；底部结构对称，由金叉确立、死叉解除。
+
+    因此这是一个持续状态而不是瞬时信号——死叉后的整段负柱区间里，顶部结构都算有效。
+    """
+    if len(bars) < STRUCTURE_MACD_SLOW * 2:
+        return False
+    window = bars.tail(STRUCTURE_MACD_HISTORY)
+    close, dif, histogram = _macd_frame(window)
+    if len(histogram) < 2:
+        return False
+    # 顶部结构只在死叉之后（柱为负）的区间里有效，金叉一旦出现即失效。
+    if top and histogram[-1] > 0:
+        return False
+    if not top and histogram[-1] < 0:
+        return False
+    groups = _histogram_groups(histogram, positive=top)
+    if len(groups) < 2:
+        return False
+    (prev_start, prev_end), (last_start, last_end) = groups[-2], groups[-1]
+    # 最近一组必须紧邻当前反向区间，确保比较的是刚结束的那次交叉。
+    if last_end >= len(histogram) - 1:
+        return False
+    prev_close = close[prev_start : prev_end + 1]
+    last_close = close[last_start : last_end + 1]
+    prev_dif = dif[prev_start : prev_end + 1]
+    last_dif = dif[last_start : last_end + 1]
+    if top:
+        return bool(last_close.max() > prev_close.max() and last_dif.max() < prev_dif.max())
+    return bool(last_close.min() < prev_close.min() and last_dif.min() > prev_dif.min())
 
 
 def _has_top_structure(bars: pd.DataFrame) -> bool:
-    """顶部结构＝MACD顶背离：后一个摆动高点收盘价更高，但对应DIF更低。
-
-    ``bars`` 需要传入截止判定时刻的完整已收盘序列，函数内部自行计算MACD并回看，
-    因为DIF依赖长历史，先截短再算会得到失真的快线。
-    """
-    if len(bars) < STRUCTURE_MACD_SLOW + STRUCTURE_SWING_CONFIRM * 2:
-        return False
-    dif = _macd_dif(bars.tail(STRUCTURE_MACD_HISTORY))
-    close = pd.to_numeric(bars["close"], errors="raise").astype(float).tail(len(dif))
-    closes = close.tail(STRUCTURE_SWING_WINDOW).to_numpy()
-    difs = dif.tail(STRUCTURE_SWING_WINDOW).to_numpy()
-    pivots = _swing_positions(closes, high=True)
-    if len(pivots) < 2:
-        return False
-    # 以窗口内价格最高的摆动点作为“新高”，再往前找一个价更低但动能更强的高点。
-    peak = max(pivots, key=lambda index: closes[index])
-    return any(
-        closes[index] < closes[peak] and difs[index] > difs[peak]
-        for index in pivots
-        if index < peak
-    )
+    """顶部结构：红柱区结束时，本组收盘价更高但DIF更低。"""
+    return _structure_confirmed(bars, top=True)
 
 
 def _has_bottom_structure(bars: pd.DataFrame) -> bool:
-    """底部结构＝MACD底背离：后一个摆动低点收盘价更低，但对应DIF更高。"""
-    if len(bars) < STRUCTURE_MACD_SLOW + STRUCTURE_SWING_CONFIRM * 2:
-        return False
-    dif = _macd_dif(bars.tail(STRUCTURE_MACD_HISTORY))
-    close = pd.to_numeric(bars["close"], errors="raise").astype(float).tail(len(dif))
-    closes = close.tail(STRUCTURE_SWING_WINDOW).to_numpy()
-    difs = dif.tail(STRUCTURE_SWING_WINDOW).to_numpy()
-    pivots = _swing_positions(closes, high=False)
-    if len(pivots) < 2:
-        return False
-    # 以窗口内价格最低的摆动点作为“新低”，再往前找一个价更高但动能更弱的低点。
-    trough = min(pivots, key=lambda index: closes[index])
-    return any(
-        closes[index] > closes[trough] and difs[index] < difs[trough]
-        for index in pivots
-        if index < trough
+    """底部结构：绿柱区结束时，本组收盘价更低但DIF更高。"""
+    return _structure_confirmed(bars, top=False)
+
+
+def _resample_minutes(bars_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """把1分钟K线按UTC自然边界聚合到指定分钟周期，不产生未来数据。"""
+    return (
+        bars_1m.resample(f"{minutes}min", origin="epoch", label="left", closed="left")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna()
     )
 
 
@@ -600,6 +620,8 @@ def run_multi_timeframe_paper_cycle(
     }
     micro_contexts: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     micro_three_minute_bars: dict[str, pd.DataFrame] = {}
+    # 顶底结构要查全部七个周期，1m/3m/10m 由1分钟重采样得到，其余用主周期K线。
+    structure_bars: dict[str, dict[str, pd.DataFrame]] = {}
     if micro_bars_by_symbol is not None:
         missing_micro = set(symbols).difference(micro_bars_by_symbol)
         if missing_micro:
@@ -610,6 +632,16 @@ def run_multi_timeframe_paper_cycle(
                 raise ValueError(f"{symbol} requires at least 65 one-minute bars")
             bars_3m = _resample_three_minute_bars(bars_1m)
             micro_three_minute_bars[symbol] = bars_3m
+            structure_bars[symbol] = {
+                "1m": bars_1m,
+                "3m": bars_3m,
+                "10m": _resample_minutes(bars_1m, 10),
+                **{
+                    interval: bars_by_symbol[symbol][interval]
+                    for interval in INTERVAL_PRIORITY
+                    if interval in bars_by_symbol[symbol]
+                },
+            }
             micro_contexts[symbol] = (
                 bars_1m,
                 _micro_bollinger_context(bars_1m),
@@ -772,6 +804,10 @@ def run_multi_timeframe_paper_cycle(
         position.trend_ride_active = False
         position.trend_ride_next_trigger_price = 0.0
         position.trend_ride_step_points = 0.0
+        position.trend_ride_last_reduce_price = 0.0
+        position.trend_ride_steps_done = 0
+        # 布林带上下轨对中轨严格对称，因此对侧轨＝2×中轨−入场轨，无需另存一份上下文。
+        position.entry_opposite_band = 2.0 * middle_reference - reference
         # ETH的“10点距离、提前2点”是固定价格点数，不能随各周期止损距离放大。
         point_scale = 1.0
         middle_trigger, middle_advance = _middle_reduction_trigger(
@@ -880,37 +916,42 @@ def run_multi_timeframe_paper_cycle(
             return None
         return context.loc[available].iloc[-1]
 
+    def structure_side(symbol: str, as_of: pd.Timestamp) -> str:
+        """返回此刻生效的结构方向：LONG=底部结构、SHORT=顶部结构、空串=没有结构。
+
+        七个周期（1m/3m/5m/10m/15m/30m/1h）任一命中即算成立，与交易周期无关——
+        做5分钟震荡也要看1小时，做1小时也要看1分钟。
+        """
+        series = structure_bars.get(symbol)
+        if not series:
+            return ""
+        found_top = found_bottom = False
+        for name, bars in series.items():
+            minutes = STRUCTURE_INTERVAL_MINUTES.get(name)
+            if minutes is None or bars is None:
+                continue
+            closed = _closed_bars_before(
+                bars, pd.Timedelta(minutes=minutes), as_of, STRUCTURE_MACD_HISTORY
+            )
+            if len(closed) < STRUCTURE_MACD_SLOW * 2:
+                continue
+            if not found_top and _has_top_structure(closed):
+                found_top = True
+            if not found_bottom and _has_bottom_structure(closed):
+                found_bottom = True
+        # 顶底同时出现时不给方向，避免多空两边都被判定成"顺结构"。
+        if found_top == found_bottom:
+            return ""
+        return "SHORT" if found_top else "LONG"
+
     def has_reversal_structure(
         symbol: str,
         interval: str,
         new_side: str,
         as_of: pd.Timestamp,
     ) -> bool:
-        """反手方向若命中对应结构则保留原方向：多单查底部结构、空单查顶部结构；
-        当前主周期或1分钟、3分钟任一确认即成立。"""
-        checker = _has_bottom_structure if new_side == "LONG" else _has_top_structure
-        # MACD依赖长历史，这里传入截止判定时刻的完整已收盘序列，由判定函数内部回看。
-        main_bars = _closed_bars_before(
-            bars_by_symbol[symbol][interval],
-            INTERVAL_DURATION[interval],
-            as_of,
-            STRUCTURE_MACD_HISTORY,
-        )
-        if checker(main_bars):
-            return True
-        if symbol not in micro_contexts:
-            return False
-        bars_1m = micro_contexts[symbol][0]
-        if checker(
-            _closed_bars_before(bars_1m, pd.Timedelta(minutes=1), as_of, STRUCTURE_MACD_HISTORY)
-        ):
-            return True
-        bars_3m = micro_three_minute_bars.get(symbol)
-        if bars_3m is not None and checker(
-            _closed_bars_before(bars_3m, pd.Timedelta(minutes=3), as_of, STRUCTURE_MACD_HISTORY)
-        ):
-            return True
-        return False
+        """开仓方向与生效结构同向时返回真——该仓位改走结构延续，不再止盈反手。"""
+        return structure_side(symbol, as_of) == new_side
 
     def structure_blocks_entry(
         symbol: str,
@@ -918,9 +959,21 @@ def run_multi_timeframe_paper_cycle(
         side: str,
         as_of: pd.Timestamp,
     ) -> bool:
-        """开仓方向与结构相反时否决：做多遇顶背离、做空遇底背离都不开这一单。"""
-        opposite = "SHORT" if side == "LONG" else "LONG"
-        return has_reversal_structure(symbol, interval, opposite, as_of)
+        """开仓方向与生效结构相反时否决：有底部结构不做空、有顶部结构不做多。"""
+        active = structure_side(symbol, as_of)
+        return bool(active) and active != side
+
+    def refresh_structure_flag(symbol: str, as_of: pd.Timestamp) -> None:
+        """持仓期间实时复查结构：开仓时没有、持仓中出现同向结构，一样转入延续模式。
+
+        结构可能在开仓后、甚至反手之后才出现，因此每分钟都要重新确认，
+        而不是只在开仓那一刻判定一次。一旦确认就保持，避免结构短暂消失导致来回切换。
+        """
+        position = state.positions[symbol]
+        if not position.position_side or position.structure_confirmed:
+            return
+        if structure_side(symbol, as_of) == position.position_side:
+            position.structure_confirmed = True
 
     def stop_interval_open_time(timestamp: pd.Timestamp, interval: str) -> pd.Timestamp:
         """把逐分钟止损时间归属到对应主周期K线，供完整收线等待规则使用。"""
@@ -949,6 +1002,8 @@ def run_multi_timeframe_paper_cycle(
 
             # 已持仓时先执行保护止损，再判断对侧轨、减仓；风险动作永远优先于新开仓。
             if position.position_side:
+                # 情况2/3：结构可能在开仓之后、或反手之后才形成，因此每分钟都要复查一次。
+                refresh_structure_flag(symbol, minute_open_time)
                 interval = position.active_interval
                 main = confirmed_context_at(symbol, interval, minute_open_time)
                 if main is not None:
@@ -1015,10 +1070,14 @@ def run_multi_timeframe_paper_cycle(
                                 market=False,
                             )
                             going_long = position.position_side == "LONG"
-                            # 止损滞后一档，落在上一个减仓价上，与当前价保持一个步长的缓冲。
-                            position.stop_price = (
-                                trigger - step if going_long else trigger + step
-                            )
+                            # 止损滞后一档：第一次阶梯减仓后落在开仓时的对侧轨，
+                            # 之后每次都落在上一次减仓的价格上。
+                            if position.trend_ride_steps_done == 0 and position.entry_opposite_band:
+                                position.stop_price = position.entry_opposite_band
+                            else:
+                                position.stop_price = position.trend_ride_last_reduce_price
+                            position.trend_ride_last_reduce_price = trigger
+                            position.trend_ride_steps_done += 1
                             position.trend_ride_next_trigger_price = (
                                 trigger + step if going_long else trigger - step
                             )
@@ -1038,9 +1097,14 @@ def run_multi_timeframe_paper_cycle(
                                 f"对侧轨结构确认：减仓50%延续原方向，不反手（步长{step:.2f}点）",
                                 market=False,
                             )
-                            position.stop_price = float(main["bb_middle"])
+                            # 止损收到开仓当时的中轨，而不是随后漂移过的当前中轨。
+                            position.stop_price = (
+                                position.middle_reference_price or float(main["bb_middle"])
+                            )
                             position.trend_ride_active = True
                             position.trend_ride_step_points = step
+                            position.trend_ride_last_reduce_price = target
+                            position.trend_ride_steps_done = 0
                             position.trend_ride_next_trigger_price = (
                                 target - step if old_side == "SHORT" else target + step
                             )

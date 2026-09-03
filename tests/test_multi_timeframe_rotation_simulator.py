@@ -9,6 +9,7 @@ import pytest
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     FIXED_STOP_DISTANCE,
     INTERVAL_PRIORITY,
+    STRUCTURE_INTERVAL_MINUTES,
     _bands_are_opening,
     _block_symbol_after_stop,
     _has_bottom_structure,
@@ -19,6 +20,7 @@ from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     _new_state,
     _parameters_for_symbol,
     _refresh_box_qualification,
+    _resample_minutes,
     _try_release_symbol_after_wait,
     run_multi_timeframe_paper_cycle,
 )
@@ -570,37 +572,55 @@ def _rally(start: float, end: float, steps: int) -> list[float]:
     return [start + span * i for i in range(steps)]
 
 
-def test_top_structure_detects_macd_bearish_divergence() -> None:
-    """价格创新高但DIF更低＝顶背离；第二个高点靠更慢的爬升制造动能衰减。"""
+def test_top_structure_compares_consecutive_red_bar_groups() -> None:
+    """顶部结构＝本组红柱区收盘价比上一组高、但DIF比上一组低，且已经走出死叉。"""
     prices = (
-        _rally(100.0, 118.0, 10)  # 第一波急涨，DIF冲高
-        + _rally(118.0, 104.0, 8)  # 回调
-        + _rally(104.0, 120.0, 22)  # 第二波缓慢爬升到更高价，但动能更弱
-        + [118.0, 117.0]  # 右侧确认摆动点
+        [100.0] * 30  # 让EMA26收敛，避免开头的暖机噪音制造假分组
+        + _rally(100.0, 118.0, 10)  # 第一组红柱：急涨，DIF冲高
+        + _rally(118.0, 106.0, 10)  # 绿柱区分隔两组
+        + _rally(106.0, 121.0, 30)  # 第二组红柱：价更高，但爬得慢，DIF更低
+        + _rally(121.0, 110.0, 10)  # 死叉确认，柱值转负
     )
 
     assert _has_top_structure(_divergence_bars(prices)) is True
 
 
-def test_top_structure_rejects_healthy_uptrend() -> None:
-    """价格创新高且动能同步走强时不是顶背离。"""
+def test_top_structure_cleared_after_golden_cross() -> None:
+    """结构是持续状态而非瞬时信号：一旦重新金叉（柱值转正），顶部结构立即失效。"""
     prices = (
-        _rally(100.0, 110.0, 10)
-        + _rally(110.0, 106.0, 5)
+        [100.0] * 30
+        + _rally(100.0, 118.0, 10)
+        + _rally(118.0, 106.0, 10)
+        + _rally(106.0, 121.0, 30)
+        + _rally(121.0, 110.0, 10)
+    )
+    assert _has_top_structure(_divergence_bars(prices)) is True
+
+    # 再拉一波把柱值推回正区间＝重新金叉。
+    assert _has_top_structure(_divergence_bars(prices + _rally(110.0, 135.0, 20))) is False
+
+
+def test_top_structure_rejects_healthy_uptrend() -> None:
+    """第二组红柱价更高、DIF也更高时是健康上涨，不构成顶部结构。"""
+    prices = (
+        [100.0] * 30
+        + _rally(100.0, 110.0, 10)
+        + _rally(110.0, 106.0, 10)
         + _rally(106.0, 140.0, 20)
-        + [138.0, 137.0]
+        + _rally(140.0, 132.0, 10)
     )
 
     assert _has_top_structure(_divergence_bars(prices)) is False
 
 
-def test_bottom_structure_detects_macd_bullish_divergence() -> None:
-    """价格创新低但DIF更高＝底背离。"""
+def test_bottom_structure_compares_consecutive_green_bar_groups() -> None:
+    """底部结构＝本组绿柱区收盘价比上一组低、但DIF比上一组高，且已经走出金叉。"""
     prices = (
-        _rally(120.0, 102.0, 10)
-        + _rally(102.0, 116.0, 8)
-        + _rally(116.0, 100.0, 22)
-        + [102.0, 103.0]
+        [120.0] * 30
+        + _rally(120.0, 102.0, 10)  # 第一组绿柱：急跌，DIF砸到最低
+        + _rally(102.0, 114.0, 10)  # 红柱区分隔
+        + _rally(114.0, 99.0, 30)  # 第二组绿柱：价更低，但跌得慢，DIF更高
+        + _rally(99.0, 110.0, 10)  # 金叉确认，柱值转正
     )
 
     assert _has_bottom_structure(_divergence_bars(prices)) is True
@@ -621,6 +641,38 @@ def test_structure_needs_enough_history_for_macd() -> None:
 
     assert _has_top_structure(short) is False
     assert _has_bottom_structure(short) is False
+
+
+def test_structure_covers_all_seven_intervals() -> None:
+    """结构判定必须覆盖用户点名的七个周期，做任何一个周期都要看齐这七个。"""
+    assert set(STRUCTURE_INTERVAL_MINUTES) == {"1m", "3m", "5m", "10m", "15m", "30m", "1h"}
+    assert STRUCTURE_INTERVAL_MINUTES == dict(
+        sorted(STRUCTURE_INTERVAL_MINUTES.items(), key=lambda item: item[1])
+    )
+
+
+def test_resample_minutes_labels_bars_by_open_time() -> None:
+    """重采样必须按开盘时间贴标签，否则结构判定会读到尚未收盘的K线。"""
+    index = pd.date_range("2026-01-01 00:00", periods=30, freq="1min", tz="UTC")
+    bars_1m = pd.DataFrame(
+        {
+            "open": range(30),
+            "high": [value + 1 for value in range(30)],
+            "low": [value - 1 for value in range(30)],
+            "close": range(30),
+            "volume": [1.0] * 30,
+        },
+        index=index,
+    )
+
+    ten = _resample_minutes(bars_1m, 10)
+
+    expected = pd.date_range("2026-01-01 00:00", periods=3, freq="10min", tz="UTC")
+    assert list(ten.index) == list(expected)
+    # 第一根10分钟K线只能由00:00–00:09这十根1分钟K线构成。
+    assert ten.iloc[0]["open"] == 0
+    assert ten.iloc[0]["close"] == 9
+    assert ten.iloc[0]["high"] == 10
 
 
 def test_ladder_step_scales_with_symbol_price() -> None:
