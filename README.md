@@ -87,9 +87,16 @@ pytest
 ```
 
 `--poll-seconds` 决定新收盘的1分钟K线最迟多久被扫到。库在本地后单轮工作只要约9秒，
-所以取20秒——保证每根1分钟K线收线后20秒内一定被处理，不会跨过整根。日常启动脚本在
-`.runtime/run-public-market-comparison-7d.command`，**该目录在 .gitignore 里、不受版本控制**，
-改参数要直接改那个文件。
+所以取20秒——保证每根1分钟K线收线后20秒内一定被处理，不会跨过整根。日常双击启动的脚本是
+`scripts/run-public-market-comparison-7d.command`（Web后台是同目录的 `run-web-ui.command`），
+改参数直接改脚本里的 `--poll-seconds`。
+
+**单轮耗时超过 `--poll-seconds` 会立即告警。** 超时后循环里的
+`wait(max(0.1, poll_seconds - elapsed))` 会退化成只等0.1秒，服务表面正常、实际在背靠背空转——
+2026-09-03 之前它就以119秒的间隔跑了好几天没被发现。持续超时按30分钟冷却期节流
+（`CYCLE_OVERRUN_ALERT_COOLDOWN`），回落到间隔内再发一次恢复通知；无论告警是否被节流，
+日志每轮都会记一行，便于回溯超时从哪一轮开始。判定逻辑在 `CycleDurationWatch`，
+不碰 I/O，可独立测试。
 
 数据库连接使用 `mysql+pymysql`，字符集统一为 `utf8mb4`，应用和数据库时间统一使用
 UTC。当前仓库按用户明确决定跟踪 `.env`；该文件含明文密钥，不得公开分享仓库或日志。

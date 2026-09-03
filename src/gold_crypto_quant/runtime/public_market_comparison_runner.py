@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 
@@ -26,6 +26,37 @@ PUBLIC_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 PUBLIC_COMPARISON_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 GATE_LIVE_STATE_PATH = Path(".runtime/bollinger-gate-live-paper-v5.json")
 BINANCE_LIVE_STATE_PATH = Path(".runtime/bollinger-binance-live-paper-v5.json")
+# 单轮耗时超过轮询间隔时的重复告警间隔；持续超时按这个周期节流，不逐轮刷屏。
+CYCLE_OVERRUN_ALERT_COOLDOWN = timedelta(minutes=30)
+
+
+@dataclass(slots=True)
+class CycleDurationWatch:
+    """判断单轮耗时是否超出轮询间隔，并对持续超时做告警节流。
+
+    单轮工作一旦超过 poll_seconds，循环里的 wait(max(0.1, poll_seconds - elapsed))
+    就退化成只等0.1秒，服务表面正常、实际在背靠背空转——2026-09-03 之前它以119秒的
+    间隔跑了好几天都没人发现。这里把判定抽成不碰I/O的纯逻辑，便于独立测试。
+    """
+
+    poll_seconds: float
+    cooldown: timedelta = CYCLE_OVERRUN_ALERT_COOLDOWN
+    streak: int = 0
+    last_alert: datetime | None = None
+
+    def observe(self, elapsed: float, now: datetime) -> str:
+        """返回本轮该发的通知：``overrun``、``recovered`` 或空串（不发）。"""
+        if elapsed <= self.poll_seconds:
+            # 只有真的超时过才发恢复通知，避免服务启动后第一轮就报"已恢复"。
+            recovered = self.streak > 0
+            self.streak = 0
+            self.last_alert = None
+            return "recovered" if recovered else ""
+        self.streak += 1
+        if self.last_alert is not None and now - self.last_alert < self.cooldown:
+            return ""
+        self.last_alert = now
+        return "overrun"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +90,7 @@ class PublicMarketComparisonRunner:
         self.reporter = reporter or (lambda _message: None)
         self.notifier = RuntimeEventNotifier(settings)
         self._failed_feeds: set[str] = set()
+        self._duration_watch = CycleDurationWatch(poll_seconds)
 
     def _notify(self, key: str, title: str, lines: tuple[str, ...], severity: str) -> None:
         """发送带对照服务前缀的事件；邮件失败不改变影子账户。"""
@@ -75,6 +107,40 @@ class PublicMarketComparisonRunner:
                 "交易所订单提交：False",
             ),
         )
+
+    def _report_cycle_duration(self, elapsed: float) -> None:
+        """单轮耗时超过轮询间隔即告警，持续超时按冷却期节流，回落后发恢复通知。"""
+        action = self._duration_watch.observe(elapsed, datetime.now(UTC))
+        streak = self._duration_watch.streak
+        if elapsed > self.poll_seconds:
+            # 无论告警是否被节流掉，日志每轮都留痕，便于事后回溯超时是从哪一轮开始的。
+            self.reporter(
+                f"单轮耗时{elapsed:.1f}秒，超过轮询间隔{self.poll_seconds:.0f}秒"
+                f"（连续第{streak}轮）"
+            )
+        if action == "overrun":
+            self._notify(
+                "cycle-overrun",
+                "单轮耗时超过轮询间隔",
+                (
+                    f"本轮耗时：{elapsed:.1f} 秒",
+                    f"配置轮询间隔：{self.poll_seconds:.0f} 秒",
+                    f"连续超时轮数：{streak}",
+                    "影响：循环已退化成只等0.1秒，行情处理不再有固定节奏",
+                    f"重复告警间隔：{CYCLE_OVERRUN_ALERT_COOLDOWN.total_seconds() / 60:.0f} 分钟",
+                ),
+                "WARNING",
+            )
+        elif action == "recovered":
+            self._notify(
+                "cycle-duration-recovered",
+                "单轮耗时恢复正常",
+                (
+                    f"本轮耗时：{elapsed:.1f} 秒",
+                    f"配置轮询间隔：{self.poll_seconds:.0f} 秒",
+                ),
+                "RECOVERED",
+            )
 
     def _report_feed_failure(self, label: str, error: Exception) -> None:
         """行情首次中断立即告警；持续失败不按分钟轰炸邮箱。"""
@@ -272,6 +338,7 @@ class PublicMarketComparisonRunner:
                 else:
                     self.reporter(f"双行情对照第{completed_cycles}轮：两个行情源均失败")
                 elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
+                self._report_cycle_duration(elapsed)
                 self.stop_event.wait(max(0.1, self.poll_seconds - elapsed))
 
         self._notify(
