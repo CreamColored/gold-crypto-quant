@@ -7,6 +7,7 @@ from gold_crypto_quant.runtime.public_market_comparison_runner import (
     PUBLIC_COMPARISON_CONTRACTS,
     ComparisonFeedResult,
     CycleDurationWatch,
+    FeedOutageWatch,
     PublicMarketComparisonRunner,
 )
 
@@ -205,3 +206,55 @@ def test_notifier_serialises_concurrent_sends(monkeypatch) -> None:
 
     assert len(pushed) == 1
     assert results == [False, False]
+
+
+def test_short_feed_blip_never_alerts() -> None:
+    """交易所与代理的短暂抖动不该打扰——2026-09-03下午币安那次503只持续3分钟。"""
+    watch = FeedOutageWatch(alert_after=20)
+
+    for _ in range(19):
+        assert watch.on_failure() is False
+    # 中途恢复一轮就清零，之后再失败19轮同样不告警。
+    assert watch.on_success() is False
+    for _ in range(19):
+        assert watch.on_failure() is False
+    assert watch.streak == 19
+
+
+def test_alert_fires_once_at_the_threshold() -> None:
+    """连续第20轮才告警，且一次故障只发一条——不能每轮都发。"""
+    watch = FeedOutageWatch(alert_after=20)
+
+    fired = [watch.on_failure() for _ in range(50)]
+
+    assert fired.count(True) == 1
+    assert fired.index(True) == 19
+
+
+def test_flapping_produces_no_alert_pairs() -> None:
+    """失败与成功交替出现时，不能连发好几对"中断+恢复"。
+
+    这正是用户收到多条恢复通知的原因：告警原先按状态翻转触发，
+    而抖动期间状态每轮都在翻。
+    """
+    watch = FeedOutageWatch(alert_after=20)
+    alerts = recoveries = 0
+
+    for _ in range(30):
+        alerts += watch.on_failure()
+        recoveries += watch.on_success()
+
+    assert alerts == 0
+    assert recoveries == 0
+
+
+def test_recovery_notifies_once_after_a_real_outage() -> None:
+    """真的告过警才报恢复，且只报一次。"""
+    watch = FeedOutageWatch(alert_after=20)
+    for _ in range(25):
+        watch.on_failure()
+    assert watch.alerted is True
+
+    assert watch.on_success() is True
+    assert watch.on_success() is False
+    assert watch.streak == 0

@@ -31,6 +31,42 @@ BINANCE_LIVE_STATE_PATH = Path(".runtime/bollinger-binance-live-paper-v5.json")
 CYCLE_OVERRUN_ALERT_COOLDOWN = timedelta(minutes=15)
 # 连续超时达到这个轮数才告警；偶发一轮变慢（网络抖动、交易所响应慢）不值得打扰。
 CYCLE_OVERRUN_ALERT_STREAK = 3
+# 行情源连续失败达到这个轮数才告警。按20秒轮询算约6.7分钟——交易所和代理的
+# 短暂抖动（2026-09-03下午币安那次503持续3分钟）不值得打扰，而且抖动期间
+# 失败与成功交替出现，按"状态翻转"告警会连发好几对中断与恢复。
+FEED_FAILURE_ALERT_STREAK = 20
+
+
+@dataclass(slots=True)
+class FeedOutageWatch:
+    """跟踪单个行情源的连续失败，决定何时告警、何时报恢复。
+
+    与 CycleDurationWatch 同一套思路：判定抽成不碰I/O的纯逻辑，便于独立测试。
+    关键是 alerted 这个标志——它保证一次故障只发一条中断、一条恢复，
+    而不是每次失败与成功的交替都发一对。
+    """
+
+    alert_after: int = FEED_FAILURE_ALERT_STREAK
+    streak: int = 0
+    alerted: bool = False
+
+    def on_failure(self) -> bool:
+        """记一次失败；返回本次是否应当发出中断告警。"""
+        self.streak += 1
+        if self.alerted or self.streak < self.alert_after:
+            return False
+        self.alerted = True
+        return True
+
+    def on_success(self) -> bool:
+        """记一次成功；返回本次是否应当发出恢复通知。
+
+        只有真的告过警才报恢复，否则会出现没报过故障却收到"已恢复"。
+        """
+        recovered = self.alerted
+        self.streak = 0
+        self.alerted = False
+        return recovered
 
 
 @dataclass(slots=True)
@@ -96,7 +132,7 @@ class PublicMarketComparisonRunner:
         self.stop_event = stop_event or Event()
         self.reporter = reporter or (lambda _message: None)
         self.notifier = RuntimeEventNotifier(settings, reporter=self.reporter)
-        self._failed_feeds: set[str] = set()
+        self._feed_watches: dict[str, FeedOutageWatch] = {}
         self._duration_watch = CycleDurationWatch(poll_seconds)
 
     def _notify(self, key: str, title: str, lines: tuple[str, ...], severity: str) -> None:
@@ -179,22 +215,31 @@ class PublicMarketComparisonRunner:
                 "RECOVERED",
             )
 
+    def _watch(self, label: str) -> FeedOutageWatch:
+        return self._feed_watches.setdefault(label, FeedOutageWatch())
+
     def _report_feed_failure(self, label: str, error: Exception) -> None:
-        """行情首次中断立即告警；持续失败不按分钟轰炸邮箱。"""
-        self.reporter(f"{label}实盘公共行情失败：{type(error).__name__}: {error}")
-        if label in self._failed_feeds:
+        """连续失败达到阈值才告警；每一轮失败都记日志，便于回溯故障起点。"""
+        watch = self._watch(label)
+        should_alert = watch.on_failure()
+        self.reporter(
+            f"{label}实盘公共行情失败（连续第{watch.streak}轮）："
+            f"{type(error).__name__}: {error}"
+        )
+        if not should_alert:
             return
-        self._failed_feeds.add(label)
         self.notifier.send(
-            event_key=f"public-comparison:{label}:feed-failed",
+            event_key=f"public-comparison:{label}:feed-failed:{datetime.now(UTC).isoformat()}",
             event_title=f"[{label}] 公共行情中断",
             event_lines=(
                 f"交易所：{label}",
+                f"连续失败轮数：{watch.streak}（达到{FEED_FAILURE_ALERT_STREAK}轮才告警）",
                 f"异常类型：{type(error).__name__}",
                 f"异常信息：{error}",
                 "处理方式：暂停该交易所本轮信号，另一交易所继续运行",
             ),
             severity="CRITICAL",
+            repeatable=True,
             comparison_status_lines=(
                 f"{label}行情：INTERRUPTED",
                 "另一行情源：继续独立运行",
@@ -204,10 +249,9 @@ class PublicMarketComparisonRunner:
         )
 
     def _report_feed_recovered(self, label: str) -> None:
-        """中断后的首个成功周期发送恢复邮件。"""
-        if label not in self._failed_feeds:
+        """只有真的发过中断告警才报恢复；闪断没告过警就不该有恢复通知。"""
+        if not self._watch(label).on_success():
             return
-        self._failed_feeds.remove(label)
         self.notifier.send(
             event_key=f"public-comparison:{label}:feed-recovered:{datetime.now(UTC).isoformat()}",
             event_title=f"[{label}] 公共行情恢复",
