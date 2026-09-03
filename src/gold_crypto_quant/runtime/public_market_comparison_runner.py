@@ -132,7 +132,7 @@ class PublicMarketComparisonRunner:
         summary: BollingerSignalCycleSummary,
         comparison_status_lines: tuple[str, ...],
     ) -> None:
-        """交易邮件明确标出行情来源，避免和原Gate测试网影子账户混淆。"""
+        """逐笔策略事件只推钉钉；标出行情来源，避免和原Gate测试网影子账户混淆。"""
         for event in summary.paper_events:
             self.notifier.send(
                 event_key=f"public-comparison:{venue}:{event.event_key}",
@@ -147,6 +147,7 @@ class PublicMarketComparisonRunner:
                 repeatable=True,
                 venue=venue,
                 comparison_status_lines=comparison_status_lines,
+                category="TRADE",
             )
 
     @staticmethod

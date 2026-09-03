@@ -1,4 +1,4 @@
-"""按交易和异常事件即时发送SMTP邮件，并在单次服务运行中去重。"""
+"""按事件类别分发通知：邮箱只收系统事件，行情交易明细走钉钉。"""
 
 import os
 from datetime import UTC, datetime
@@ -21,9 +21,13 @@ from gold_crypto_quant.storage.trade_events import (
     read_paper_trade_events,
 )
 
+# 邮箱只承载系统事件：服务起停、行情接口中断与恢复、风控熔断、策略阻断状态。
+# 开仓、减仓、平仓这类逐笔行情交易明细量大且不需要留邮件底稿，只推钉钉。
+EMAIL_SUPPRESSED_CATEGORIES = frozenset({"TRADE"})
+
 
 class RuntimeEventNotifier:
-    """将每笔模拟成交和重要状态变化转换为即时邮件。"""
+    """把运行期事件分发到邮件和钉钉两条独立通道。"""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -75,10 +79,12 @@ class RuntimeEventNotifier:
         repeatable: bool = False,
         venue: str | None = None,
         comparison_status_lines: tuple[str, ...] | None = None,
+        category: str = "SYSTEM",
     ) -> bool:
-        """发送并审计一封事件邮件；相同非重复事件在本进程中只发送一次。
+        """分发一条事件；相同非重复事件在本进程中只处理一次。
 
         钉钉与邮件是两条独立通道：邮件未配置时钉钉照常推送，反之亦然。
+        category为TRADE的行情交易明细只推钉钉，不进邮箱；返回值表示邮件是否发出。
         """
         if not repeatable and event_key in self._sent_keys:
             return False
@@ -89,8 +95,8 @@ class RuntimeEventNotifier:
             severity=severity,
             status_lines=comparison_status_lines,
         )
-        if not self.enabled:
-            # 邮件未启用时也要记账，否则同一事件每轮都会重复推送钉钉。
+        if not self.enabled or category in EMAIL_SUPPRESSED_CATEGORIES:
+            # 不走邮件时也要记账，否则同一事件每轮都会重复推送钉钉。
             if not repeatable:
                 self._sent_keys.add(event_key)
             return False
@@ -142,8 +148,8 @@ class RuntimeEventNotifier:
         return False
 
     def notify_new_trades(self) -> int:
-        """逐笔发送游标之后的新成交；失败的邮件留到下一轮重试。"""
-        if not self.enabled:
+        """逐笔推送游标之后的新成交；成交明细只走钉钉，不再进邮箱。"""
+        if not (self.enabled or self.dingtalk.enabled):
             return 0
         sent = 0
         for event in read_paper_trade_events(self._last_trade_id):
@@ -161,7 +167,7 @@ class RuntimeEventNotifier:
                 f"退出原因：{event.exit_reason or '-'}",
                 f"成交时间UTC：{event.executed_at:%Y-%m-%d %H:%M:%S}",
             )
-            success = self.send(
+            self.send(
                 event_key=f"trade:{event.trade_id}",
                 event_title=f"{event.symbol} 模拟{action}{lifecycle}",
                 event_lines=lines,
@@ -171,9 +177,9 @@ class RuntimeEventNotifier:
                     else "INFO"
                 ),
                 now=datetime.now(UTC),
+                category="TRADE",
             )
-            if not success:
-                break
+            # 成交不再走邮件，钉钉的失败已在推送层吞掉，没有可重试的对象，游标照常前进。
             self._last_trade_id = event.trade_id
             sent += 1
         return sent

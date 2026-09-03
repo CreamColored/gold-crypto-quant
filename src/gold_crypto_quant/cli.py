@@ -1248,13 +1248,14 @@ def main() -> None:
                 f"影子权益{signal_summary.paper_equity:.2f} USDT"
             )
             for paper_event in signal_summary.paper_events:
-                # 调用事件邮件，把每次模拟开仓、减仓、平仓和熔断立即通知用户。
+                # 每次模拟开仓、减仓、平仓只推钉钉；邮箱留给系统事件。
                 event_notifier.send(
                     event_key=paper_event.event_key,
                     event_title=paper_event.title,
                     event_lines=paper_event.lines,
                     severity=paper_event.severity,
                     repeatable=True,
+                    category="TRADE",
                 )
             if signal_summary.status != previous_signal_status and signal_summary.status in {
                 "BLOCKED_MARKET_HEALTH",

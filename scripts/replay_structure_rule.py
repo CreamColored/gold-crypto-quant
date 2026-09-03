@@ -133,8 +133,11 @@ def ledger(events):
 
 def parse_arguments(argv):
     parser = argparse.ArgumentParser(description="顶底结构规则对照复盘")
-    parser.add_argument("day", help="回放日期，格式 YYYY-MM-DD（UTC自然日）")
-    parser.add_argument("--since", help="只统计该北京时间时刻之后开的仓，格式 HH:MM")
+    parser.add_argument("day", help="回放截止日期，格式 YYYY-MM-DD（含当天整个UTC自然日）")
+    parser.add_argument(
+        "--since",
+        help="只统计该北京时间时刻之后开的仓，格式 HH:MM（当天）或 'YYYY-MM-DD HH:MM'（可跨日）",
+    )
     parser.add_argument(
         "--warmup-hours",
         type=float,
@@ -160,7 +163,9 @@ def main(argv=None) -> int:
     start = max(m.index[64] for m in micro_bars.values()) + pd.Timedelta(minutes=1)
     cutoff = None
     if args.since:
-        cutoff = pd.Timestamp(f"{day} {args.since}", tz="Asia/Shanghai").tz_convert("UTC")
+        # --since 允许带日期，用来统计跨日的时间窗；只给 HH:MM 时默认是截止日当天。
+        moment = args.since if " " in args.since else f"{day} {args.since}"
+        cutoff = pd.Timestamp(moment, tz="Asia/Shanghai").tz_convert("UTC")
         start = max(start, cutoff - pd.Timedelta(hours=args.warmup_hours))
     minutes = [t for t in micro_bars["ETH_USDT"].index if t >= start]
     if not minutes:
@@ -183,10 +188,23 @@ def main(argv=None) -> int:
             tag, minutes, main_bars, micro_bars, target, disable_structure=disabled
         )
         trades = ledger(events)
+        opening_equity = 10_000.0
         if cutoff is not None:
             beijing_cutoff = f"{cutoff.tz_convert('Asia/Shanghai'):%Y-%m-%d %H:%M}"
+            # 窗口起点的权益＝窗口内第一笔交易之前的最后一次记录，用来算窗口净盈亏。
+            for event in events:
+                if _field(event["lines"], "北京时间")[:16] >= beijing_cutoff:
+                    break
+                snapshot = _field(event["lines"], "影子权益")
+                if snapshot:
+                    opening_equity = float(snapshot.split()[0])
             trades = [t for t in trades if t["开仓"] >= beijing_cutoff]
-        results[tag] = {"equity": equity, "events": events, "trades": trades}
+        results[tag] = {
+            "equity": equity,
+            "opening_equity": opening_equity,
+            "events": events,
+            "trades": trades,
+        }
         # 每跑完一组就落盘，打印环节出错也不会白跑一遍。
         (target / "result.json").write_text(
             json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8"
@@ -198,10 +216,11 @@ def main(argv=None) -> int:
         losses = [t for t in trades if t["盈亏"] < 0]
         decided = len(wins) + len(losses)
         rate = f"{len(wins) / decided:.0%}" if decided else "—"
-        label = "关闭结构规则" if tag == "baseline" else "开启结构规则"
+        label = "旧策略（关闭结构规则）" if tag == "baseline" else "新策略（开启结构规则）"
+        opening = data["opening_equity"]
         print(
-            f"\n===== {label} =====  权益 {data['equity']:.2f}  "
-            f"净盈亏 {data['equity'] - 10_000:+.2f}U  "
+            f"\n===== {label} =====  窗口起点 {opening:.2f} → 收尾 {data['equity']:.2f}  "
+            f"窗口净盈亏 {data['equity'] - opening:+.2f}U  "
             f"{len(trades)}笔  盈{len(wins)} 亏{len(losses)}  胜率 {rate}"
         )
         for trade in trades:

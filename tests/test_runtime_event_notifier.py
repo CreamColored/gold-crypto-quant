@@ -1,4 +1,4 @@
-"""即时成交邮件的游标和逐笔发送测试。"""
+"""事件分流测试：成交只推钉钉，系统事件才进邮箱。"""
 
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -67,12 +67,65 @@ def test_each_new_trade_gets_its_own_email(monkeypatch) -> None:
         smtp_from="sender@example.com",
     )
     notifier = RuntimeEventNotifier(settings)
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        notifier, "_push_dingtalk", lambda **kwargs: pushed.append(kwargs["event_title"])
+    )
 
-    # 调用成交扫描后，买入和卖出必须分别生成邮件，不能合并成周期摘要。
+    # 调用成交扫描后，买入和卖出各推一条钉钉，且游标必须逐笔前进。
     count = notifier.notify_new_trades()
 
     assert count == 2
-    assert sent_subjects == [
+    assert notifier._last_trade_id == 6
+    assert pushed == [
         "ETH_USDT 模拟买入开仓成交",
         "ETH_USDT 模拟卖出平仓成交",
     ]
+    # 邮箱只留给系统事件；逐笔成交明细一封都不发。
+    assert sent_subjects == []
+
+
+def test_system_event_still_sends_email(monkeypatch) -> None:
+    """服务起停、接口中断这类系统事件必须照常进邮箱。"""
+    sent_subjects: list[str] = []
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.latest_paper_trade_id",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.build_gate_event_email",
+        lambda _now, **kwargs: SimpleNamespace(subject=kwargs["event_title"], body="body"),
+    )
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.send_smtp_email",
+        lambda message, **_kwargs: sent_subjects.append(message.subject),
+    )
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.save_email_delivery",
+        lambda **_kwargs: 1,
+    )
+    settings = Settings(
+        status_email_to="recipient@example.com",
+        smtp_host="smtp.example.com",
+        smtp_username="sender@example.com",
+        smtp_password=SecretStr("code"),
+        smtp_from="sender@example.com",
+    )
+    notifier = RuntimeEventNotifier(settings)
+    monkeypatch.setattr(notifier, "_push_dingtalk", lambda **_kwargs: None)
+
+    assert notifier.send(
+        event_key="runtime:SERVICE_STOPPED",
+        event_title="Gate行情服务停止",
+        event_lines=("详情：手动停止",),
+        severity="WARNING",
+    )
+    # 交易类事件即使配了邮箱也不发。
+    assert not notifier.send(
+        event_key="rotation-v5:开仓",
+        event_title="模拟开仓：买入做多",
+        event_lines=("品种：ETH_USDT",),
+        category="TRADE",
+    )
+
+    assert sent_subjects == ["Gate行情服务停止"]
