@@ -172,7 +172,12 @@ ETH 5m/15m 5点、30m/1h 10点。BTC与ETH可以同时持仓，但同一币种�
 
 ```bash
 .venv/bin/python scripts/replay_structure_rule.py 2026-09-02
+.venv/bin/python scripts/replay_structure_rule.py 2026-09-03 --since 09:00 --arm structure
 ```
+
+`--since` 只让台账统计该北京时间之后开的仓，之前的行情照跑不误——箱体确认是逐根K线累积
+的状态，冷启动直接从关注时刻开跑会让前几笔单子因为箱体尚未确认而消失；预热时长由
+`--warmup-hours` 控制，默认12小时。`--arm structure` 只跑当前策略，省掉对照组的一半耗时。
 
 顶底结构规则的对照复盘：同一段行情逐分钟跑两遍影子模拟器，一遍关闭结构判定、一遍开启，
 打印两组的交易台账并把明细写到 `var/replay/<日期>/result.json`。必须逐分钟驱动而不是一次性

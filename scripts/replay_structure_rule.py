@@ -2,6 +2,10 @@
 
 用法：
     .venv/bin/python scripts/replay_structure_rule.py 2026-09-02
+    .venv/bin/python scripts/replay_structure_rule.py 2026-09-03 --since 09:00 --arm structure
+
+--since 之前的行情仍然要跑，只是不计入台账：箱体确认是逐根K线累积的状态，
+冷启动直接从关注时刻开跑会让前几笔单子因为箱体尚未确认而消失。
 
 必须逐分钟驱动而不是一次性喂整段行情：box_active 是单份可变状态，
 一次性回放会让分钟循环读到收盘后的箱体结论，等于偷看未来。
@@ -9,6 +13,7 @@
 结果写入 var/replay/<日期>.json，控制台打印两组的交易台账。
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -26,6 +31,8 @@ MAIN_INTERVALS = ("5m", "15m", "30m", "1h")
 OUTPUT_ROOT = Path("var/replay")
 # 单轮只保留最近若干根，既够MACD和布林带收敛，也避免每分钟重算整年历史。
 WINDOW = 400
+# --since 之前默认多跑这么多小时，让箱体、止损冷却和MACD都进入稳定状态。
+DEFAULT_WARMUP_HOURS = 12
 
 
 def load_bars(end: pd.Timestamp):
@@ -124,30 +131,62 @@ def ledger(events):
     return trades
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("用法：scripts/replay_structure_rule.py <YYYY-MM-DD>")
-        return 2
-    day = sys.argv[1]
+def parse_arguments(argv):
+    parser = argparse.ArgumentParser(description="顶底结构规则对照复盘")
+    parser.add_argument("day", help="回放日期，格式 YYYY-MM-DD（UTC自然日）")
+    parser.add_argument("--since", help="只统计该北京时间时刻之后开的仓，格式 HH:MM")
+    parser.add_argument(
+        "--warmup-hours",
+        type=float,
+        default=DEFAULT_WARMUP_HOURS,
+        help=f"--since 之前额外跑多少小时预热，默认{DEFAULT_WARMUP_HOURS}",
+    )
+    parser.add_argument(
+        "--arm",
+        choices=("both", "structure", "baseline"),
+        default="both",
+        help="跑哪一组：both=两组对照，structure=只跑当前策略",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_arguments(sys.argv[1:] if argv is None else argv)
+    day = args.day
     end = pd.Timestamp(day, tz="UTC") + pd.Timedelta(days=1)
     main_bars, micro_bars = load_bars(end)
 
     # 起点取所有品种都攒够65根1分钟K线的时刻；XAU上线晚于BTC和ETH。
     start = max(m.index[64] for m in micro_bars.values()) + pd.Timedelta(minutes=1)
+    cutoff = None
+    if args.since:
+        cutoff = pd.Timestamp(f"{day} {args.since}", tz="Asia/Shanghai").tz_convert("UTC")
+        start = max(start, cutoff - pd.Timedelta(hours=args.warmup_hours))
     minutes = [t for t in micro_bars["ETH_USDT"].index if t >= start]
     if not minutes:
         print(f"{day} 没有可回放的1分钟行情")
         return 1
     print(f"回放 {minutes[0]} → {minutes[-1]}，共 {len(minutes)} 分钟")
+    if cutoff is not None:
+        print(f"台账只统计 {cutoff.tz_convert('Asia/Shanghai'):%Y-%m-%d %H:%M} 北京时间之后开的仓")
 
     target = OUTPUT_ROOT / day
     target.mkdir(parents=True, exist_ok=True)
+    arms = {
+        "both": (("baseline", True), ("structure", False)),
+        "structure": (("structure", False),),
+        "baseline": (("baseline", True),),
+    }[args.arm]
     results = {}
-    for tag, disabled in (("baseline", True), ("structure", False)):
+    for tag, disabled in arms:
         events, equity = run(
             tag, minutes, main_bars, micro_bars, target, disable_structure=disabled
         )
-        results[tag] = {"equity": equity, "events": events, "trades": ledger(events)}
+        trades = ledger(events)
+        if cutoff is not None:
+            beijing_cutoff = f"{cutoff.tz_convert('Asia/Shanghai'):%Y-%m-%d %H:%M}"
+            trades = [t for t in trades if t["开仓"] >= beijing_cutoff]
+        results[tag] = {"equity": equity, "events": events, "trades": trades}
         # 每跑完一组就落盘，打印环节出错也不会白跑一遍。
         (target / "result.json").write_text(
             json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8"
