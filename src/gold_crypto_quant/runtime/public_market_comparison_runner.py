@@ -14,7 +14,11 @@ from gold_crypto_quant.market_data.binance_history import (
     BINANCE_LIVE_VENUE,
     import_binance_history,
 )
-from gold_crypto_quant.market_data.gate_history import GATE_LIVE_VENUE, import_gate_history
+from gold_crypto_quant.market_data.gate_history import (
+    GATE_LIVE_VENUE,
+    import_gate_history,
+    take_deadlock_retry_count,
+)
 from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
 from gold_crypto_quant.runtime.bollinger_signal_cycle import (
     BollingerSignalCycleSummary,
@@ -395,10 +399,14 @@ class PublicMarketComparisonRunner:
                 # 计时必须包含通知发送：钉钉和SMTP都是网络调用，属于本轮真实开销。
                 elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
                 # 两个交易所并行，各自耗时会重叠，因此总耗时不等于两者相加。
+                # 死锁重试成功不会报错，不显式打出来就分不清"没发生"和"被吞了"。
+                retries = take_deadlock_retry_count()
+                retry_note = f"；死锁重试{retries}次" if retries else ""
                 timing = (
                     f"耗时{elapsed:.1f}秒"
                     f"（并行：Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
                     f"，通知 {elapsed - max(gate_seconds, binance_seconds):.1f}）"
+                    f"{retry_note}"
                 )
                 if feed_results:
                     details = "；".join(

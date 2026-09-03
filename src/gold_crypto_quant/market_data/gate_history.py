@@ -175,6 +175,16 @@ def _earliest_bar_time(session: Session, instrument_id: int, interval: str) -> d
 # 杀掉该交易所的周期，连策略都不会跑：并行上线后八九分钟就发生一次。
 DEADLOCK_RETRIES = 4
 DEADLOCK_BACKOFF_SECONDS = 0.05
+# 重试成功是静默的：日志里没有报错并不等于没有死锁。用一个计数器把它暴露出来，
+# 否则"修好了"和"还在发生但被吞掉了"这两种状态从外面看完全一样。
+_deadlock_retries = 0
+
+
+def take_deadlock_retry_count() -> int:
+    """读取并清零自上次调用以来的死锁重试次数。"""
+    global _deadlock_retries
+    count, _deadlock_retries = _deadlock_retries, 0
+    return count
 
 
 def _is_retryable_lock_error(error: OperationalError) -> bool:
@@ -210,6 +220,8 @@ def _store_frame(
             if not _is_retryable_lock_error(error) or attempt == DEADLOCK_RETRIES - 1:
                 raise
             # 死锁时 MySQL 已经回滚了该事务，必须先回滚会话才能重发。
+            global _deadlock_retries
+            _deadlock_retries += 1
             session.rollback()
             time.sleep(DEADLOCK_BACKOFF_SECONDS * (attempt + 1))
     raise AssertionError("unreachable")

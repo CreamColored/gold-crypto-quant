@@ -14,6 +14,7 @@ from gold_crypto_quant.market_data.gate_history import (
     DEADLOCK_RETRIES,
     _is_retryable_lock_error,
     _store_frame,
+    take_deadlock_retry_count,
 )
 
 
@@ -117,3 +118,23 @@ def test_lock_wait_timeout_counts_as_retryable() -> None:
     assert _is_retryable_lock_error(_error(1213)) is True
     assert _is_retryable_lock_error(_error(1205)) is True
     assert _is_retryable_lock_error(_error(1146)) is False
+
+
+def test_retry_count_is_observable(patched, monkeypatch) -> None:
+    """重试成功不会报错——不把次数暴露出来，"没发生"和"被吞了"从外面看一模一样。"""
+    take_deadlock_retry_count()   # 清零，避免受其他用例影响
+    session = _Session(fail_times=2)
+    calls = {"n": 0}
+
+    def upsert(_session, rows):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _error(1213)
+        return len(rows)
+
+    monkeypatch.setattr(gate_history, "_upsert_bars", upsert)
+    _store_frame(session, _frame(), instrument_id=1, interval="1m", now=pd.Timestamp.utcnow())
+
+    assert take_deadlock_retry_count() == 2
+    # 读取即清零，下一轮从头计数。
+    assert take_deadlock_retry_count() == 0
