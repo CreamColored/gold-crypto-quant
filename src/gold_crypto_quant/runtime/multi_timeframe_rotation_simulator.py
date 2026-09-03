@@ -33,6 +33,13 @@ FIXED_STOP_DISTANCE = {
 }
 OTHER_SYMBOL_STOP_RETURN = 0.40
 
+# 手续费按币安与Gate的U本位永续VIP0公开费率：挂单0.02%、吃单0.05%。
+# 不要改回负的maker费率——那是VIP4以上才有的挂单返佣，普通账户拿不到。
+# 2026-09-03实测：当天73笔成交、名义额32.2万U，返佣假设让手续费少算47.95U，
+# 足以把当天的+18.73U翻成-29.22U。
+MAKER_FEE_RATE = 0.0002
+TAKER_FEE_RATE = 0.0005
+
 
 @dataclass(slots=True)
 class SymbolPaperPositionState:
@@ -602,8 +609,8 @@ def run_multi_timeframe_paper_cycle(
     micro_bars_by_symbol: dict[str, pd.DataFrame] | None = None,
     state_path: Path = DEFAULT_MULTI_STATE_PATH,
     initial_equity: float = 10_000.0,
-    maker_fee_rate: float = -0.0001,
-    taker_fee_rate: float = 0.00075,
+    maker_fee_rate: float = MAKER_FEE_RATE,
+    taker_fee_rate: float = TAKER_FEE_RATE,
     stop_slippage_rate: float = 0.0002,
     risk_per_trade: float = 0.0025,
 ) -> MultiTimeframePaperSummary:

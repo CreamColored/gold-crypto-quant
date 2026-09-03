@@ -9,7 +9,9 @@ import pytest
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     FIXED_STOP_DISTANCE,
     INTERVAL_PRIORITY,
+    MAKER_FEE_RATE,
     STRUCTURE_INTERVAL_MINUTES,
+    TAKER_FEE_RATE,
     _bands_are_opening,
     _base_asset,
     _block_symbol_after_stop,
@@ -654,6 +656,19 @@ def test_holdings_never_renders_blank() -> None:
     source = inspect.getsource(module.run_multi_timeframe_paper_cycle)
     returns = source.count("return MultiTimeframePaperSummary(")
     assert returns == source.count("holdings=")
+
+
+def test_fees_use_real_vip0_rates_not_maker_rebate() -> None:
+    """必须用真实公开费率；负的maker费率是VIP4以上的挂单返佣，普通账户拿不到。
+
+    策略几乎全走限价单，2026-09-03当天73笔成交、名义额32.2万U，
+    把付费当成返佣会少算47.95U手续费，足以把当天的+18.73U翻成-29.22U。
+    """
+    assert MAKER_FEE_RATE == 0.0002
+    assert TAKER_FEE_RATE == 0.0005
+    # 挂单必须是成本而不是收益，否则换手越多"赚"得越多。
+    assert MAKER_FEE_RATE > 0
+    assert TAKER_FEE_RATE > MAKER_FEE_RATE
 
 
 def test_duration_renders_for_phone_notifications() -> None:
