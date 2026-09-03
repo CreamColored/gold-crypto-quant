@@ -94,7 +94,7 @@ class PublicMarketComparisonRunner:
         self.max_cycles = max_cycles
         self.stop_event = stop_event or Event()
         self.reporter = reporter or (lambda _message: None)
-        self.notifier = RuntimeEventNotifier(settings)
+        self.notifier = RuntimeEventNotifier(settings, reporter=self.reporter)
         self._failed_feeds: set[str] = set()
         self._duration_watch = CycleDurationWatch(poll_seconds)
 

@@ -1156,7 +1156,7 @@ def main() -> None:
         )
         stop_event = Event()
         # 创建事件通知器；不再按固定四小时发送，只在成交或重要状态变化时发送。
-        event_notifier = RuntimeEventNotifier(settings)
+        event_notifier = RuntimeEventNotifier(settings, reporter=_runtime_log)
         previous_gate_risk_state: str | None = None
         previous_signal_status: str | None = None
 

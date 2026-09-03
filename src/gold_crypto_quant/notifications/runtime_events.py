@@ -1,6 +1,7 @@
 """按事件类别分发通知：邮箱只收系统事件，行情交易明细走钉钉。"""
 
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,8 +30,15 @@ EMAIL_SUPPRESSED_CATEGORIES = frozenset({"TRADE"})
 class RuntimeEventNotifier:
     """把运行期事件分发到邮件和钉钉两条独立通道。"""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        reporter: Callable[[str], None] | None = None,
+    ) -> None:
         self.settings = settings
+        # 推送失败不能影响交易主流程，但必须在日志里留痕；静默吞掉会让通道坏了都没人知道。
+        self.reporter = reporter or (lambda _message: None)
         self.enabled = bool(settings.status_email_to)
         self._sent_keys: set[str] = set()
         # 服务重启时从当前最大成交开始，只通知本次运行后产生的新成交。
@@ -53,7 +61,7 @@ class RuntimeEventNotifier:
         severity: str,
         status_lines: tuple[str, ...] | None,
     ) -> None:
-        """推送到钉钉；任何失败都吞掉，告警通道不得反过来影响交易主流程。"""
+        """推送到钉钉；失败只记日志不抛出，告警通道不得反过来影响交易主流程。"""
         if not self.dingtalk.enabled:
             return
         try:
@@ -65,8 +73,9 @@ class RuntimeEventNotifier:
                     status_lines=status_lines,
                 )
             )
-        except (DingtalkError, OSError, ValueError):
-            pass
+        except (DingtalkError, OSError, ValueError) as error:
+            # 只输出异常类型与消息，webhook 的 access_token 不进日志。
+            self.reporter(f"钉钉推送失败（{event_title}）：{type(error).__name__}: {error}")
 
     def send(
         self,

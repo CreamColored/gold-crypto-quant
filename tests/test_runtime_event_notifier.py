@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from pydantic import SecretStr
 
 from gold_crypto_quant.config import Settings
+from gold_crypto_quant.notifications.dingtalk_bot import DingtalkError
 from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
 from gold_crypto_quant.storage.trade_events import PaperTradeEvent
 
@@ -129,3 +130,42 @@ def test_system_event_still_sends_email(monkeypatch) -> None:
     )
 
     assert sent_subjects == ["Gate行情服务停止"]
+
+
+def test_dingtalk_failure_is_logged_not_swallowed(monkeypatch) -> None:
+    """推送失败必须在日志里留痕：静默吞掉会让告警通道坏了都没人知道。"""
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.latest_paper_trade_id",
+        lambda: 0,
+    )
+    logged: list[str] = []
+    sent_mail: list[str] = []
+    # 必须显式关掉邮件：Settings 会从 .env 读默认值，否则这个测试会真的发一封邮件。
+    monkeypatch.setattr(
+        "gold_crypto_quant.notifications.runtime_events.send_smtp_email",
+        lambda message, **_kwargs: sent_mail.append(message.subject),
+    )
+    settings = Settings(
+        status_email_to="",
+        dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=token",
+        dingtalk_secret=SecretStr("SECdeadbeef"),
+    )
+    notifier = RuntimeEventNotifier(settings, reporter=logged.append)
+
+    def explode(_message):
+        raise DingtalkError("send text failed: 310000 keywords not in content")
+
+    monkeypatch.setattr(notifier.dingtalk, "send", explode)
+
+    # 推送失败不能让调用方抛异常，交易主流程必须继续。
+    assert notifier.send(
+        event_key="runtime:SERVICE_STARTED",
+        event_title="服务启动",
+        event_lines=("详情：测试",),
+    ) is False
+    assert len(logged) == 1
+    assert "钉钉推送失败（服务启动）" in logged[0]
+    assert "DingtalkError" in logged[0]
+    # 日志里不能出现 webhook 的 access_token。
+    assert "token" not in logged[0]
+    assert sent_mail == []
