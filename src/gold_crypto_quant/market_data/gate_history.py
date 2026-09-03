@@ -1,5 +1,6 @@
 """下载 Gate 测试网历史K线并幂等写入 MySQL。"""
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -7,6 +8,7 @@ from decimal import Decimal
 import pandas as pd
 from sqlalchemy import Engine, func, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from gold_crypto_quant.exchanges.gate import SUPPORTED_INTERVALS, GateTestnetClient
@@ -167,6 +169,20 @@ def _earliest_bar_time(session: Session, instrument_id: int, interval: str) -> d
     return session.execute(statement).scalar_one_or_none()
 
 
+# Gate与币安并行拉取时会同时往 market_bars 批量upsert，InnoDB 在唯一索引上的
+# 间隙锁可能交叉成死锁。MySQL 的报错本身就写着 try restarting transaction——
+# 死锁是并发写入的正常现象，输的那一方回滚重试即可。不重试的话一次死锁会整轮
+# 杀掉该交易所的周期，连策略都不会跑：并行上线后八九分钟就发生一次。
+DEADLOCK_RETRIES = 4
+DEADLOCK_BACKOFF_SECONDS = 0.05
+
+
+def _is_retryable_lock_error(error: OperationalError) -> bool:
+    """识别 MySQL 1213 死锁与 1205 锁等待超时；两者都应当回滚重试。"""
+    args = getattr(getattr(error, "orig", None), "args", ())
+    return bool(args) and args[0] in {1213, 1205}
+
+
 def _store_frame(
     session: Session,
     frame: pd.DataFrame,
@@ -183,11 +199,20 @@ def _store_frame(
         interval=interval,
         now=now,
     )
-    # 调用批量upsert，同一品种、周期和开盘时间不会重复插入。
-    stored = _upsert_bars(session, rows)
-    # 每一页独立提交；网络中断后已经完成的页面不会丢失。
-    session.commit()
-    return stored, skipped_open
+    for attempt in range(DEADLOCK_RETRIES):
+        try:
+            # 调用批量upsert，同一品种、周期和开盘时间不会重复插入。
+            stored = _upsert_bars(session, rows)
+            # 每一页独立提交；网络中断后已经完成的页面不会丢失。
+            session.commit()
+            return stored, skipped_open
+        except OperationalError as error:
+            if not _is_retryable_lock_error(error) or attempt == DEADLOCK_RETRIES - 1:
+                raise
+            # 死锁时 MySQL 已经回滚了该事务，必须先回滚会话才能重发。
+            session.rollback()
+            time.sleep(DEADLOCK_BACKOFF_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 def import_gate_history(
