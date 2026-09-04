@@ -8,7 +8,12 @@ from gold_crypto_quant.runtime.bollinger_rotation_simulator import RotationPaper
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     run_multi_timeframe_paper_cycle,
 )
-from gold_crypto_quant.storage.bar_source import SourceHealth, check_health, load_bars
+from gold_crypto_quant.storage.bar_source import (
+    SourceHealth,
+    check_health,
+    load_bars,
+    load_provisional,
+)
 from gold_crypto_quant.storage.market_health import refresh_market_health
 from gold_crypto_quant.storage.trading_switches import load_switches, resolve_entry_allowed
 
@@ -85,9 +90,17 @@ def run_bollinger_signal_cycle(
     paper_kwargs = {"state_path": state_path} if state_path is not None else {}
     # 交易开关只挡开仓：关闭后已有仓位的止损、减仓与止盈照常执行。
     switches = load_switches()
+    # 在途K线只喂触轨判定，不参与指标计算——把未收线的那根算进布林带和MACD，
+    # 轨道会在分钟内不停抖动，且与回测口径分叉。
+    provisional_by_symbol = {
+        symbol: bar
+        for symbol in symbols
+        if (bar := load_provisional(symbol, venue=venue, health=source_health)) is not None
+    }
     paper = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
         micro_bars_by_symbol=micro_bars_by_symbol,
+        provisional_by_symbol=provisional_by_symbol,
         entry_allowed=lambda symbol: resolve_entry_allowed(switches, venue, symbol),
         **paper_kwargs,
     )

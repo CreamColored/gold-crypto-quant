@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -85,6 +86,14 @@ class MultiTimeframePaperState:
     last_bar_times: dict[str, dict[str, str]] = field(default_factory=dict)
     # 逐分钟触轨游标；同一根1分钟K线重复轮询时不能重复开仓或平仓。
     last_micro_bar_times: dict[str, str] = field(default_factory=dict)
+    # 在途K线的触轨条件首次成立的时刻。条件连续成立满 provisional_dwell_seconds 秒
+    # 才真正开仓——BTC 每分钟的最高点有两成只停留了一秒，这些插针不值得进场。
+    # 条件一旦断掉就清空，重新计时。
+    provisional_touch_since: dict[str, str] = field(default_factory=dict)
+    # 当前这一仓是在哪根1分钟K线内开的。该K线收线后带着完整极值再次进入循环时，
+    # 那些极值可能发生在开仓之前——用入场前的价格止损是错的，因此跳过这一根的
+    # 止损判定，从下一根开始正常判。
+    opened_in_bar: dict[str, str] = field(default_factory=dict)
     box_active: dict[str, dict[str, bool]] = field(default_factory=dict)
     blocked_after_stop: dict[str, dict[str, bool]] = field(default_factory=dict)
     reset_streak: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -397,6 +406,36 @@ def _has_bottom_structure(bars: pd.DataFrame) -> bool:
     return _structure_confirmed(bars, top=False)
 
 
+def _provisional_dwell_ready(
+    state: "MultiTimeframePaperState",
+    symbol: str,
+    qualified: bool,
+    now: datetime,
+    dwell_seconds: float,
+) -> bool:
+    """在途触轨是否已经连续成立够久。
+
+    条件首次成立时记下时刻，之后每秒复查：仍然成立就看够不够 ``dwell_seconds``，
+    断掉就清空重新计时。用时刻而不是计数，是因为轮次可能被跳过或变慢，"评估了三次"
+    不等于"成立了三秒"。
+
+    只用于在途K线。收线K线代表整整一分钟，本身已是充分观察，不加这道闸。
+    """
+    if not qualified:
+        state.provisional_touch_since.pop(symbol, None)
+        return False
+    raw = state.provisional_touch_since.get(symbol)
+    if not raw:
+        state.provisional_touch_since[symbol] = now.isoformat()
+        return dwell_seconds <= 0
+    try:
+        since = datetime.fromisoformat(raw)
+    except ValueError:
+        state.provisional_touch_since[symbol] = now.isoformat()
+        return dwell_seconds <= 0
+    return (now - since).total_seconds() >= dwell_seconds
+
+
 def _resample_minutes(bars_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
     """把1分钟K线按UTC自然边界聚合到指定分钟周期，不产生未来数据。"""
     return (
@@ -615,6 +654,9 @@ def run_multi_timeframe_paper_cycle(
     stop_slippage_rate: float = 0.0002,
     risk_per_trade: float = 0.0025,
     minimum_reward_risk: float = 0.0,
+    provisional_by_symbol: "dict[str, pd.Series] | None" = None,
+    provisional_dwell_seconds: float = 3.0,
+    now: "datetime | None" = None,
     entry_allowed: "Callable[[str], bool] | None" = None,
 ) -> MultiTimeframePaperSummary:
     """按周期、品种优先级逐批处理K线，全系统始终最多持有一笔仓位。"""
@@ -1084,20 +1126,32 @@ def run_multi_timeframe_paper_cycle(
     # V5.7把已确认箱体后的触轨、止损、减仓和止盈全部下沉到1分钟。
     # 行情服务每分钟调用一次，因此不必等待15m/30m/1h收线才发送交易事件。
     if micro_contexts and not micro_cursor_initialized:
-        minute_items: list[tuple[pd.Timestamp, str, int]] = []
+        wall_clock = now or datetime.now(UTC)
+        # 元组第四位标记这根是不是在途K线（尚未收线、用盘口合成）。
+        minute_items: list[tuple[pd.Timestamp, str, int, bool]] = []
         for symbol in symbols:
             bars_1m = micro_contexts[symbol][0]
             last_micro_time = pd.Timestamp(state.last_micro_bar_times[symbol])
             for position, minute_open_time in enumerate(bars_1m.index):
                 if minute_open_time > last_micro_time:
-                    minute_items.append((pd.Timestamp(minute_open_time), symbol, position))
+                    minute_items.append((pd.Timestamp(minute_open_time), symbol, position, False))
+            # 在途K线排在所有收线K线之后：它覆盖的是当前这一分钟，时间上最新。
+            provisional = (provisional_by_symbol or {}).get(symbol)
+            if provisional is not None:
+                provisional_time = pd.Timestamp(provisional.name)
+                if provisional_time > last_micro_time:
+                    minute_items.append((provisional_time, symbol, -1, True))
 
-        for minute_open_time, symbol, minute_position in sorted(
+        for minute_open_time, symbol, minute_position, is_provisional in sorted(
             minute_items,
-            key=lambda item: (item[0], symbols.index(item[1])),
+            key=lambda item: (item[0], item[3], symbols.index(item[1])),
         ):
             bars_1m = micro_contexts[symbol][0]
-            minute_bar = bars_1m.iloc[minute_position]
+            minute_bar = (
+                (provisional_by_symbol or {})[symbol]
+                if is_provisional
+                else bars_1m.iloc[minute_position]
+            )
             position = state.positions[symbol]
             traded_this_minute = False
 
@@ -1110,12 +1164,22 @@ def run_multi_timeframe_paper_cycle(
                 if main is not None:
                     upper = float(main["bb_upper"])
                     lower = float(main["bb_lower"])
-                    stop_hit = (
-                        position.position_side == "LONG"
-                        and float(minute_bar["low"]) <= position.stop_price
-                    ) or (
-                        position.position_side == "SHORT"
-                        and float(minute_bar["high"]) >= position.stop_price
+                    # 开仓所在的那一根收线后会带着整分钟的极值回到这里，而其中一部分
+                    # 发生在开仓之前。跳过这一根的止损判定，从下一根开始正常判——
+                    # 开仓当时的即时止损在 open_position 之后已经单独判过了。
+                    same_bar_as_entry = (
+                        not is_provisional
+                        and state.opened_in_bar.get(symbol) == minute_open_time.isoformat()
+                    )
+                    stop_hit = not same_bar_as_entry and (
+                        (
+                            position.position_side == "LONG"
+                            and float(minute_bar["low"]) <= position.stop_price
+                        )
+                        or (
+                            position.position_side == "SHORT"
+                            and float(minute_bar["high"]) >= position.stop_price
+                        )
                     )
                     target_hit = (
                         position.position_side == "LONG" and float(minute_bar["high"]) >= upper
@@ -1309,7 +1373,7 @@ def run_multi_timeframe_paper_cycle(
                     # 同一分钟同时穿过上下轨时无法还原先后顺序，保守跳过而不猜测方向。
                     side = "SHORT" if touched_upper else "LONG"
                     reference = upper if touched_upper else lower
-                    if (
+                    qualified = (
                         touched_upper != touched_lower
                         and switch_allows_entry(symbol)
                         and not structure_blocks_entry(
@@ -1318,7 +1382,15 @@ def run_multi_timeframe_paper_cycle(
                         and entry_reward_is_acceptable(
                             symbol, interval, side, reference, float(main["bb_middle"])
                         )
-                    ):
+                    )
+                    if is_provisional:
+                        # 在途K线要求触轨条件连续成立满若干秒才开仓。BTC每分钟的最高点
+                        # 有两成只停留了一秒，这些插针的证据强度远不如站住的触碰；而
+                        # 收线K线不加这道闸——它代表整整一分钟，本身已是充分的观察。
+                        qualified = _provisional_dwell_ready(
+                            state, symbol, qualified, wall_clock, provisional_dwell_seconds
+                        )
+                    if qualified:
                         open_position(
                             side,
                             symbol,
@@ -1328,6 +1400,10 @@ def run_multi_timeframe_paper_cycle(
                             minute_open_time,
                             f"{interval}震荡箱体触及{'上轨' if touched_upper else '下轨'}即时开仓",
                         )
+                        # 记下开仓所在的K线。这一根收线后带着完整极值再来时，那些极值
+                        # 可能发生在开仓之前——用入场前的价格止损是错的。
+                        state.opened_in_bar[symbol] = minute_open_time.isoformat()
+                        state.provisional_touch_since.pop(symbol, None)
                         immediate_stop = (
                             side == "LONG"
                             and float(minute_bar["low"]) <= position.stop_price
@@ -1352,7 +1428,11 @@ def run_multi_timeframe_paper_cycle(
                                 interval,
                                 stop_interval_open_time(minute_open_time, interval),
                             )
-            state.last_micro_bar_times[symbol] = minute_open_time.isoformat()
+            if not is_provisional:
+                # 在途K线绝不推进游标：推过去之后，这一分钟收线时带着真实最高最低价
+                # 再来，就会因为"不比游标新"而被整根跳过——用几秒钟的残缺数据做了
+                # 决策，整分钟的真实极值被静默丢弃。
+                state.last_micro_bar_times[symbol] = minute_open_time.isoformat()
 
     # 把两个品种、三个交易周期按实际收盘时刻合并，同一时刻先周期再品种排序。
     grouped: dict[pd.Timestamp, list[tuple[str, str, int]]] = {}

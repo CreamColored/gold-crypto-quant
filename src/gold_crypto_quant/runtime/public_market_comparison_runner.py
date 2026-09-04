@@ -204,7 +204,15 @@ class PublicMarketComparisonRunner:
                 "INFO",
             )
 
-    def _run_feed(self, label: str, venue: str, state_path: Path, health: SourceHealth) -> tuple:
+    def _run_feed(
+        self,
+        label: str,
+        venue: str,
+        state_path: Path,
+        health: SourceHealth,
+        *,
+        bars_changed: bool = True,
+    ) -> tuple:
         """跑一个交易所的策略流水线。行情拉取已搬到采集服务，这里只消费。
 
         两个交易所之间没有任何共享可变状态——不同的 instrument、不同的影子账户
@@ -215,7 +223,10 @@ class PublicMarketComparisonRunner:
         started = datetime.now(UTC)
         result: ComparisonFeedResult | None = None
         try:
-            self._refresh_health(venue)
+            # 行情健康表是按收线K线判定的，每秒重刷一遍等于每秒30次写入却得不到
+            # 任何新信息；只在真的有新收线时刷。
+            if bars_changed:
+                self._refresh_health(venue)
             summary = run_bollinger_signal_cycle(
                 symbols=PUBLIC_COMPARISON_CONTRACTS,
                 venue=venue,
@@ -398,27 +409,29 @@ class PublicMarketComparisonRunner:
         )
         while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
             cycle_started = datetime.now(UTC)
-            # 先判断有没有新收线K线；两边都没有就整轮跳过，不读K线也不跑策略。
+            # 每秒都跑：在途K线每秒变一次，触轨的停留确认要靠逐秒复查才能计时。
+            # cursor 有没有前进只决定要不要刷健康表和写日志。
             plans = []
+            bars_changed = False
             for label, venue, state_path in (
                 ("Gate", GATE_LIVE_VENUE, GATE_LIVE_STATE_PATH),
                 ("币安", BINANCE_LIVE_VENUE, BINANCE_LIVE_STATE_PATH),
             ):
                 advanced, health = self._cursor_advanced(venue)
                 self._report_source(label, venue, health)
-                if advanced:
-                    plans.append((label, venue, state_path, health))
-            if not plans:
-                self.stop_event.wait(self.poll_seconds)
-                continue
+                bars_changed = bars_changed or advanced
+                plans.append((label, venue, state_path, health, advanced))
 
             gate_result = binance_result = None
             gate_seconds = binance_seconds = 0.0
             # 两个交易所之间没有共享可变状态，并行；策略在 venue 内部仍串行。
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="feed") as pool:
                 futures = {
-                    label: pool.submit(self._run_feed, label, venue, state_path, health)
-                    for label, venue, state_path, health in plans
+                    label: pool.submit(
+                        self._run_feed, label, venue, state_path, health,
+                        bars_changed=advanced,
+                    )
+                    for label, venue, state_path, health, advanced in plans
                 }
                 for label, future in futures.items():
                     result, seconds = future.result()
@@ -451,14 +464,17 @@ class PublicMarketComparisonRunner:
                 f"，通知 {elapsed - max(gate_seconds, binance_seconds):.1f}）"
                 f"{retry_note}"
             )
-            if feed_results:
+            signals = sum(item.summary.new_signal_count for item in feed_results)
+            # 每秒一行日志会把有用的信息淹掉。只在有新收线K线、或本轮真的产生了
+            # 交易信号时留痕；纯粹的在途复查轮次不写日志。
+            if feed_results and (bars_changed or signals):
                 details = "；".join(
                     f"{item.label}[{item.source}]权益"
                     f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
                     for item in feed_results
                 )
                 self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}；{timing}")
-            else:
+            elif not feed_results:
                 self.reporter(
                     f"双行情对照第{completed_cycles}轮：两个行情源均失败；{timing}"
                 )

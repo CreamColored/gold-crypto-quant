@@ -84,3 +84,22 @@ def load_bars(
         except Exception:  # noqa: BLE001 - 单条读失败就走 MySQL，不影响其它序列
             pass
     return load_market_bars(symbol, interval, venue=venue, limit=limit)
+
+
+def load_provisional(
+    symbol: str, *, venue: str, health: SourceHealth
+) -> pd.Series | None:
+    """取当前这一分钟的在途K线；没有或已降级时返回 None。
+
+    降级期间不返回：在途K线只存在于 Redis，采集服务的视图既然已经陈旧，这根也
+    不可信。降级后策略退回"只看收线K线"的老行为，这是安全的方向。
+    """
+    if health.degraded:
+        return None
+    try:
+        frame = read_bars(venue, symbol, "1m", limit=2, include_provisional=True)
+    except Exception:  # noqa: BLE001 - 读不到就当没有，策略退回收线K线
+        return None
+    if frame.empty or not bool(frame["provisional"].iloc[-1]):
+        return None
+    return frame.iloc[-1]
