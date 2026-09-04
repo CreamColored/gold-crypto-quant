@@ -50,7 +50,7 @@ def load_bars(end: pd.Timestamp):
     return main, micro
 
 
-def run(tag, minutes, main, micro, state_dir, *, disable_structure):
+def run(tag, minutes, main, micro, state_dir, *, disable_structure, reward_risk=0.0):
     """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。"""
     original = (sim._has_top_structure, sim._has_bottom_structure)
     if disable_structure:
@@ -78,7 +78,8 @@ def run(tag, minutes, main, micro, state_dir, *, disable_structure):
             if any(len(m) < 65 for m in micro_slice.values()):
                 continue
             summary = sim.run_multi_timeframe_paper_cycle(
-                main_slice, micro_bars_by_symbol=micro_slice, state_path=state_path
+                main_slice, micro_bars_by_symbol=micro_slice, state_path=state_path,
+                minimum_reward_risk=reward_risk,
             )
             events.extend(summary.events)
             equity = summary.equity
@@ -145,6 +146,12 @@ def parse_arguments(argv):
         help=f"--since 之前额外跑多少小时预热，默认{DEFAULT_WARMUP_HOURS}",
     )
     parser.add_argument(
+        "--reward-risk",
+        type=float,
+        default=0.0,
+        help="开仓赔率门槛：到中轨距离 ÷ 止损距离 低于该值就不开单，0=不启用",
+    )
+    parser.add_argument(
         "--arm",
         choices=("both", "structure", "baseline"),
         default="both",
@@ -175,7 +182,8 @@ def main(argv=None) -> int:
     if cutoff is not None:
         print(f"台账只统计 {cutoff.tz_convert('Asia/Shanghai'):%Y-%m-%d %H:%M} 北京时间之后开的仓")
 
-    target = OUTPUT_ROOT / day
+    suffix = f"-rr{args.reward_risk:g}" if args.reward_risk else ""
+    target = OUTPUT_ROOT / f"{day}{suffix}"
     target.mkdir(parents=True, exist_ok=True)
     arms = {
         "both": (("baseline", True), ("structure", False)),
@@ -185,7 +193,8 @@ def main(argv=None) -> int:
     results = {}
     for tag, disabled in arms:
         events, equity = run(
-            tag, minutes, main_bars, micro_bars, target, disable_structure=disabled
+            tag, minutes, main_bars, micro_bars, target,
+            disable_structure=disabled, reward_risk=args.reward_risk,
         )
         trades = ledger(events)
         opening_equity = 10_000.0

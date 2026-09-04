@@ -613,6 +613,7 @@ def run_multi_timeframe_paper_cycle(
     taker_fee_rate: float = TAKER_FEE_RATE,
     stop_slippage_rate: float = 0.0002,
     risk_per_trade: float = 0.0025,
+    minimum_reward_risk: float = 0.0,
 ) -> MultiTimeframePaperSummary:
     """按周期、品种优先级逐批处理K线，全系统始终最多持有一笔仓位。"""
     # 保留旧的单品种测试调用形式；正式运行传入“品种→周期→K线”的两层结构。
@@ -1026,6 +1027,33 @@ def run_multi_timeframe_paper_cycle(
         active = structure_side(symbol, as_of)
         return bool(active) and active != side
 
+    def entry_reward_is_acceptable(
+        symbol: str,
+        interval: str,
+        side: str,
+        reference: float,
+        middle_reference: float,
+    ) -> bool:
+        """第一个收益目标离得太近就不开这一单——开仓那一刻赔率已经是负的。
+
+        止损是写死的固定点数（BTC 5m 250点、ETH 5点、XAU按0.32%换算），
+        而到中轨的距离由布林带宽度决定，两者之间没有任何约束关系。箱体窄的时候
+        到中轨可能只有2点而止损仍是14点，做对了赚不回手续费、做错了亏满一格。
+
+        2026-09-04 当天XAU反复出现这种单子：赔率0.19:1到0.32:1，
+        十几笔下来净贡献接近于零，纯粹在交手续费。
+
+        门槛为0时不做任何过滤，行为与启用前完全一致。
+        """
+        if minimum_reward_risk <= 0:
+            return True
+        parameters = parameters_by_market[symbol][interval]
+        trigger, _advance = _middle_reduction_trigger(
+            symbol, side, reference, middle_reference, 1.0
+        )
+        reward = abs(trigger - reference)
+        return reward >= parameters.fixed_stop_distance * minimum_reward_risk
+
     def refresh_structure_flag(symbol: str, as_of: pd.Timestamp) -> None:
         """持仓期间实时复查结构：开仓时没有、持仓中出现同向结构，一样转入延续模式。
 
@@ -1195,8 +1223,15 @@ def run_multi_timeframe_paper_cycle(
                                 and not state.permanent_fuse
                             )
                             new_side = "SHORT" if old_side == "LONG" else "LONG"
-                            if box_valid and not structure_blocks_entry(
-                                symbol, interval, new_side, minute_open_time
+                            if (
+                                box_valid
+                                and not structure_blocks_entry(
+                                    symbol, interval, new_side, minute_open_time
+                                )
+                                and entry_reward_is_acceptable(
+                                    symbol, interval, new_side, target,
+                                    float(main["bb_middle"]),
+                                )
                             ):
                                 open_position(
                                     new_side,
@@ -1261,14 +1296,17 @@ def run_multi_timeframe_paper_cycle(
                     touched_upper = float(minute_bar["high"]) >= upper
                     touched_lower = float(minute_bar["low"]) <= lower
                     # 同一分钟同时穿过上下轨时无法还原先后顺序，保守跳过而不猜测方向。
-                    if touched_upper != touched_lower and not structure_blocks_entry(
-                        symbol,
-                        interval,
-                        "SHORT" if touched_upper else "LONG",
-                        minute_open_time,
+                    side = "SHORT" if touched_upper else "LONG"
+                    reference = upper if touched_upper else lower
+                    if (
+                        touched_upper != touched_lower
+                        and not structure_blocks_entry(
+                            symbol, interval, side, minute_open_time
+                        )
+                        and entry_reward_is_acceptable(
+                            symbol, interval, side, reference, float(main["bb_middle"])
+                        )
                     ):
-                        side = "SHORT" if touched_upper else "LONG"
-                        reference = upper if touched_upper else lower
                         open_position(
                             side,
                             symbol,
