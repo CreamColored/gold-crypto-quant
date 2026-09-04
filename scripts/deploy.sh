@@ -59,7 +59,8 @@ fi
 
 # ---- 4. 重启：采集在前，量化在后 ----
 say "重启服务"
-ssh "$HOST" "sudo systemctl restart ${SERVICES[*]}"
+# 服务以 root 运行，systemd 是系统级单元，不需要 sudo。
+ssh "$HOST" "systemctl restart ${SERVICES[*]}"
 
 # ---- 5. 验证：不能只看 systemctl active ----
 # 崩溃重启循环里 systemctl 也会短暂显示 active。必须确认它真的产出了新日志。
