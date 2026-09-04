@@ -235,7 +235,11 @@ class PublicMarketComparisonRunner:
             )
             result = ComparisonFeedResult(label, health.source, summary)
             # 保存该交易所独立的影子权益与交易事件，Web后台只读这些监管数据。
-            record_shadow_cycle(venue, state_path, summary)
+            # 快照表按分钟去重，1秒轮询下同一行会被反复 upsert 60 次，59 次是无效
+            # 写入却各自是一个完整的 InnoDB 事务。只在有新收线K线或真的产生了事件
+            # 时才写——前者保证每分钟至少一次快照，后者保证在途开仓不会漏记。
+            if bars_changed or summary.paper_events:
+                record_shadow_cycle(venue, state_path, summary)
             self._report_feed_recovered(label)
         except Exception as error:  # noqa: BLE001 - 一个交易所失败不能带停另一个
             self._report_feed_failure(label, error)

@@ -115,7 +115,14 @@ def read_bars(
     MySQL 时不用走另一套解析。
     """
     client = client or build_redis()
-    raw = client.zrange(bars_key(venue, symbol, interval), 0, -1)
+    # 只取需要的尾部。序列里最多只有一根在途K线且必然在末尾，因此排除在途时多取
+    # 一根就够。取全量再在Python里切会白解析几百条JSON——读在途K线传的是limit=2，
+    # 却要先解析501条，每秒六次就是每秒三千条无用解析。
+    if limit is None:
+        start = 0
+    else:
+        start = -(limit + (0 if include_provisional else 1))
+    raw = client.zrange(bars_key(venue, symbol, interval), start, -1)
     parsed = [_from_member(item) for item in raw]
     if not include_provisional:
         parsed = [bar for bar in parsed if not bar.provisional]
