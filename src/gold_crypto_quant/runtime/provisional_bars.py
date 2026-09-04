@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import pandas as pd
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
@@ -136,3 +137,88 @@ def rebuild_from_seconds(
     last = rows[-1]
     bar.close = mid(last.bid_close or last.bid_low, last.ask_close or last.ask_high)
     return bar
+
+
+def load_second_quotes(
+    venue: str,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    *,
+    engine: Engine | None = None,
+) -> pd.DataFrame:
+    """读取一段时间的秒级盘口，用于回测重放在途K线。
+
+    回测必须能重现在途K线，否则改动之后就没法验证——而策略现在会在分钟内动作，
+    只喂收线K线的回放已经代表不了实盘行为。这条路径只对 2026-09-03 15:05 之后的
+    数据有效，更早没有秒级记录。
+    """
+    engine = engine or build_engine()
+    statement = (
+        select(
+            MarketQuoteSecond.bucket_time,
+            MarketQuoteSecond.bid_low, MarketQuoteSecond.bid_high,
+            MarketQuoteSecond.ask_low, MarketQuoteSecond.ask_high,
+            MarketQuoteSecond.bid_close, MarketQuoteSecond.ask_close,
+        )
+        .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
+        .where(
+            Instrument.venue == venue,
+            Instrument.symbol == symbol,
+            MarketQuoteSecond.bucket_time >= start,
+            MarketQuoteSecond.bucket_time < end,
+        )
+        .order_by(MarketQuoteSecond.bucket_time)
+    )
+    with Session(engine) as session:
+        rows = session.execute(statement).all()
+    if not rows:
+        return pd.DataFrame(columns=["hi", "lo", "close"])
+    frame = pd.DataFrame(
+        [
+            {
+                "bucket_time": r.bucket_time,
+                "hi": (float(r.bid_high) + float(r.ask_high)) / 2,
+                "lo": (float(r.bid_low) + float(r.ask_low)) / 2,
+                "close": (
+                    (float(r.bid_close) + float(r.ask_close)) / 2
+                    if r.bid_close is not None and r.ask_close is not None
+                    else (float(r.bid_low) + float(r.ask_high)) / 2
+                ),
+            }
+            for r in rows
+        ]
+    )
+    frame["bucket_time"] = pd.to_datetime(frame["bucket_time"], utc=True)
+    return frame.set_index("bucket_time")
+
+
+def replay_progression(
+    seconds: pd.DataFrame, minute: datetime
+) -> list[tuple[datetime, dict]]:
+    """把某一分钟的秒级盘口展开成"逐秒的在途K线"，与实盘写 Redis 的形态一致。
+
+    每一秒的 high/low 是**从本分钟开始到这一秒**的累计最值，close 是这一秒的中间价——
+    实盘的在途K线正是这样累加出来的，回放必须一模一样，否则停留确认的行为会分叉。
+    """
+    window = seconds.loc[
+        (seconds.index >= pd.Timestamp(minute)) & (seconds.index < pd.Timestamp(minute) + MINUTE)
+    ]
+    if window.empty:
+        return []
+    out: list[tuple[datetime, dict]] = []
+    hi = lo = opening = None
+    for moment, row in window.iterrows():
+        if opening is None:
+            opening = float(row["close"])
+            hi = lo = opening
+        hi = max(hi, float(row["hi"]))
+        lo = min(lo, float(row["lo"]))
+        out.append(
+            (
+                moment.to_pydatetime(),
+                {"open": opening, "high": hi, "low": lo, "close": float(row["close"]),
+                 "volume": 0.0, "quote_volume": 0.0},
+            )
+        )
+    return out

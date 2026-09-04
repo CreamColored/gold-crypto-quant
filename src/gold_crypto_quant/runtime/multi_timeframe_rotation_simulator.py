@@ -436,6 +436,50 @@ def _provisional_dwell_ready(
     return (now - since).total_seconds() >= dwell_seconds
 
 
+# 指标与重采样全是收线K线的纯函数，而收线K线一分钟才变一次。改成每秒轮询之后，
+# 一分钟内的六十次调用会把同样的布林带、MACD和重采样重算六十遍——线上占掉近半个
+# 核心，逐秒回测更是直接不可行（24小时要跑51分钟）。
+#
+# 指纹用长度＋首尾时间＋首尾收盘价：K线一旦收线就不再变动，追加新K线会改变长度和
+# 末根时间，滑动窗口会改变首根时间。全是 O(1)，比重算便宜几个数量级。
+_CONTEXT_CACHE: dict[tuple, pd.DataFrame] = {}
+_CONTEXT_CACHE_LIMIT = 128
+
+
+def _frame_fingerprint(frame: pd.DataFrame) -> tuple:
+    if frame.empty:
+        return (0,)
+    close = frame["close"]
+    return (
+        len(frame),
+        frame.index[0].value,
+        frame.index[-1].value,
+        float(close.iloc[0]),
+        float(close.iloc[-1]),
+    )
+
+
+def _cached(key: tuple, build) -> pd.DataFrame:
+    """按指纹缓存纯函数结果；超出上限就整体清空，不做LRU簿记。
+
+    条目数只有品种×周期的量级（十几条），到不了上限；上限只是防止回测里滑动窗口
+    把字典撑大。整体清空比维护淘汰顺序更简单，代价是偶尔多算一轮。
+    """
+    hit = _CONTEXT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    if len(_CONTEXT_CACHE) >= _CONTEXT_CACHE_LIMIT:
+        _CONTEXT_CACHE.clear()
+    value = build()
+    _CONTEXT_CACHE[key] = value
+    return value
+
+
+def reset_context_cache() -> None:
+    """清空指标缓存；测试与回测切换数据源时调用。"""
+    _CONTEXT_CACHE.clear()
+
+
 def _resample_minutes(bars_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
     """把1分钟K线按UTC自然边界聚合到指定分钟周期，不产生未来数据。"""
     return (
@@ -686,7 +730,13 @@ def run_multi_timeframe_paper_cycle(
     }
     contexts = {
         symbol: {
-            interval: build_rotation_box_context(bars, parameters_by_market[symbol][interval])
+            interval: _cached(
+                ("box", symbol, interval, _frame_fingerprint(bars),
+                 repr(parameters_by_market[symbol][interval])),
+                lambda bars=bars, symbol=symbol, interval=interval: build_rotation_box_context(
+                    bars, parameters_by_market[symbol][interval]
+                ),
+            )
             for interval, bars in symbol_bars.items()
         }
         for symbol, symbol_bars in bars_by_symbol.items()
@@ -703,12 +753,19 @@ def run_multi_timeframe_paper_cycle(
             bars_1m = micro_bars_by_symbol[symbol]
             if len(bars_1m) < 65:
                 raise ValueError(f"{symbol} requires at least 65 one-minute bars")
-            bars_3m = _resample_three_minute_bars(bars_1m)
+            micro_key = _frame_fingerprint(bars_1m)
+            bars_3m = _cached(
+                ("3m", symbol, micro_key),
+                lambda bars_1m=bars_1m: _resample_three_minute_bars(bars_1m),
+            )
             micro_three_minute_bars[symbol] = bars_3m
             structure_bars[symbol] = {
                 "1m": bars_1m,
                 "3m": bars_3m,
-                "10m": _resample_minutes(bars_1m, 10),
+                "10m": _cached(
+                    ("10m", symbol, micro_key),
+                    lambda bars_1m=bars_1m: _resample_minutes(bars_1m, 10),
+                ),
                 **{
                     interval: bars_by_symbol[symbol][interval]
                     for interval in INTERVAL_PRIORITY
@@ -717,8 +774,14 @@ def run_multi_timeframe_paper_cycle(
             }
             micro_contexts[symbol] = (
                 bars_1m,
-                _micro_bollinger_context(bars_1m),
-                _micro_bollinger_context(bars_3m),
+                _cached(
+                    ("mb1", symbol, micro_key),
+                    lambda bars_1m=bars_1m: _micro_bollinger_context(bars_1m),
+                ),
+                _cached(
+                    ("mb3", symbol, micro_key, _frame_fingerprint(bars_3m)),
+                    lambda bars_3m=bars_3m: _micro_bollinger_context(bars_3m),
+                ),
             )
     state = _load_state(state_path)
     if state is None:

@@ -23,6 +23,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from gold_crypto_quant.runtime import multi_timeframe_rotation_simulator as sim  # noqa: E402
+from gold_crypto_quant.runtime.provisional_bars import (  # noqa: E402
+    load_second_quotes,
+    replay_progression,
+)
 from gold_crypto_quant.storage.market_bars import load_market_bars  # noqa: E402
 
 VENUE = "GATE_LIVE_PUBLIC"
@@ -50,8 +54,16 @@ def load_bars(end: pd.Timestamp):
     return main, micro
 
 
-def run(tag, minutes, main, micro, state_dir, *, disable_structure, reward_risk=0.0):
-    """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。"""
+def run(
+    tag, minutes, main, micro, state_dir, *,
+    disable_structure, reward_risk=0.0, seconds=None, dwell=3.0, second_step=1,
+):
+    """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。
+
+    传入 ``seconds`` 时额外重放在途K线：每一分钟内按秒推进，形态与实盘写 Redis 的
+    完全一致（累计最高最低 + 当秒中间价）。不重放的话，回测代表不了实盘——策略
+    现在会在分钟内动作，而只喂收线K线的回放看不到这些。
+    """
     original = (sim._has_top_structure, sim._has_bottom_structure)
     if disable_structure:
         sim._has_top_structure = lambda *_a, **_k: False
@@ -79,10 +91,35 @@ def run(tag, minutes, main, micro, state_dir, *, disable_structure, reward_risk=
                 continue
             summary = sim.run_multi_timeframe_paper_cycle(
                 main_slice, micro_bars_by_symbol=micro_slice, state_path=state_path,
-                minimum_reward_risk=reward_risk,
+                minimum_reward_risk=reward_risk, now=now.to_pydatetime(),
             )
             events.extend(summary.events)
             equity = summary.equity
+            if seconds is not None:
+                # 收线K线处理完之后，在这一分钟内按秒推进在途K线，与实盘同序。
+                progression = {
+                    symbol: replay_progression(seconds[symbol], now.to_pydatetime())
+                    for symbol in micro_slice
+                }
+                depth = max((len(v) for v in progression.values()), default=0)
+                for tick in range(0, depth, second_step):
+                    provisional, moment = {}, None
+                    for symbol, steps in progression.items():
+                        if tick < len(steps):
+                            at, payload = steps[tick]
+                            moment = at
+                            provisional[symbol] = pd.Series(payload, name=pd.Timestamp(now))
+                    if not provisional:
+                        continue
+                    summary = sim.run_multi_timeframe_paper_cycle(
+                        main_slice, micro_bars_by_symbol=micro_slice, state_path=state_path,
+                        minimum_reward_risk=reward_risk,
+                        provisional_by_symbol=provisional,
+                        provisional_dwell_seconds=dwell,
+                        now=moment,
+                    )
+                    events.extend(summary.events)
+                    equity = summary.equity
             if index % 200 == 0:
                 print(f"  {tag} {now} 权益 {equity:.2f} 事件 {len(events)}", flush=True)
     finally:
@@ -152,6 +189,20 @@ def parse_arguments(argv):
         help="开仓赔率门槛：到中轨距离 ÷ 止损距离 低于该值就不开单，0=不启用",
     )
     parser.add_argument(
+        "--provisional",
+        action="store_true",
+        help="重放在途K线（逐秒），只对 2026-09-03 15:05 之后的窗口有效",
+    )
+    parser.add_argument(
+        "--dwell", type=float, default=3.0, help="触轨停留确认秒数，0=关闭"
+    )
+    parser.add_argument(
+        "--second-step",
+        type=int,
+        default=1,
+        help="每隔几秒评估一次；大于1会让停留确认失真，仅供快速摸底",
+    )
+    parser.add_argument(
         "--arm",
         choices=("both", "structure", "baseline"),
         default="both",
@@ -190,11 +241,26 @@ def main(argv=None) -> int:
         "structure": (("structure", False),),
         "baseline": (("baseline", True),),
     }[args.arm]
+    seconds = None
+    if args.provisional:
+        window_start = minutes[0].to_pydatetime()
+        window_end = minutes[-1].to_pydatetime() + pd.Timedelta(minutes=1).to_pytimedelta()
+        seconds = {
+            symbol: load_second_quotes(VENUE, symbol, window_start, window_end)
+            for symbol in SYMBOLS
+        }
+        covered = {symbol: len(frame) for symbol, frame in seconds.items()}
+        print(f"  在途重放：秒级盘口 {covered}", flush=True)
+        if not any(covered.values()):
+            print("  窗口内没有秒级盘口，退回只喂收线K线", flush=True)
+            seconds = None
+
     results = {}
     for tag, disabled in arms:
         events, equity = run(
             tag, minutes, main_bars, micro_bars, target,
             disable_structure=disabled, reward_risk=args.reward_risk,
+            seconds=seconds, dwell=args.dwell, second_step=max(1, args.second_step),
         )
         trades = ledger(events)
         opening_equity = 10_000.0
