@@ -1,0 +1,43 @@
+{
+  "range": {
+    "lookback_bars": 200,
+    "swing_window": 2,
+    "touch_tolerance": 0.0015,
+    "min_touches": 2,
+    "min_box_height": 0.004,
+    "max_box_height": 0.06,
+    "use_body_for_edges": true,
+    "entry_zone": 0.15,
+    "require_edge_rejection": true,
+    "exit_at_opposite": true,
+    "middle_reduce_ratio": 0.0,
+    "stop_buffer": 0.25,
+    "breakout_body_close": true,
+    "breakout_volume_ratio": 1.5,
+    "exit_on_breakout": true,
+    "risk_per_trade": 0.0025,
+    "max_positions": 1
+  },
+  "trend": {
+    "direction_interval": "1h",
+    "entry_interval": "15m",
+    "require_direction_agreement": true,
+    "min_waves": 3,
+    "min_wave_bars": 2,
+    "trend_lookback": 150,
+    "require_zero_axis": true,
+    "pullback_min": 0.2,
+    "pullback_max": 0.75,
+    "volume_shrink_ratio": 0.7,
+    "volume_expand_ratio": 1.2,
+    "require_volume": true,
+    "stop_atr_multiple": 1.0,
+    "atr_period": 14,
+    "take_profit_r": 0.0,
+    "trail_start_r": 1.0,
+    "trail_atr_multiple": 2.0,
+    "exit_on_trend_break": true,
+    "risk_per_trade": 0.0025,
+    "max_positions": 1
+  }
+}
