@@ -12,12 +12,14 @@ from gold_crypto_quant.exchanges.binance import BinancePublicClient
 from gold_crypto_quant.exchanges.gate import GatePublicClient
 from gold_crypto_quant.market_data.binance_history import (
     BINANCE_LIVE_VENUE,
-    import_binance_history,
 )
 from gold_crypto_quant.market_data.gate_history import (
     GATE_LIVE_VENUE,
-    import_gate_history,
     take_deadlock_retry_count,
+)
+from gold_crypto_quant.market_data.live_feed import (
+    refresh_binance_live_bars,
+    refresh_gate_live_bars,
 )
 from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
 from gold_crypto_quant.runtime.bollinger_signal_cycle import (
@@ -138,6 +140,12 @@ class PublicMarketComparisonRunner:
         self.notifier = RuntimeEventNotifier(settings, reporter=self.reporter)
         self._feed_watches: dict[str, FeedOutageWatch] = {}
         self._duration_watch = CycleDurationWatch(poll_seconds)
+        # 每个交易所各记一份"该周期最近刷到哪根收线K线"。1小时线一小时才变一次，
+        # 旧路径每20秒重拉一遍，一天白问4300次；水位让到期的周期才发请求。
+        self._refreshed: dict[str, dict[str, datetime]] = {
+            GATE_LIVE_VENUE: {},
+            BINANCE_LIVE_VENUE: {},
+        }
 
     def _notify(self, key: str, title: str, lines: tuple[str, ...], severity: str) -> None:
         """发送带对照服务前缀的事件；邮件失败不改变影子账户。"""
@@ -359,10 +367,11 @@ class PublicMarketComparisonRunner:
                     gate_future = pool.submit(
                         self._run_feed,
                         "Gate",
-                        lambda: import_gate_history(
+                        lambda: refresh_gate_live_bars(
                             gate,
                             contracts=PUBLIC_COMPARISON_CONTRACTS,
                             intervals=PUBLIC_COMPARISON_INTERVALS,
+                            refreshed=self._refreshed[GATE_LIVE_VENUE],
                             limit=self.limit,
                             venue=GATE_LIVE_VENUE,
                         ),
@@ -372,10 +381,11 @@ class PublicMarketComparisonRunner:
                     binance_future = pool.submit(
                         self._run_feed,
                         "币安",
-                        lambda: import_binance_history(
+                        lambda: refresh_binance_live_bars(
                             binance,
                             contracts=PUBLIC_COMPARISON_CONTRACTS,
                             intervals=PUBLIC_COMPARISON_INTERVALS,
+                            refreshed=self._refreshed[BINANCE_LIVE_VENUE],
                             limit=self.limit,
                         ),
                         BINANCE_LIVE_VENUE,
