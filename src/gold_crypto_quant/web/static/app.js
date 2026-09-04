@@ -342,6 +342,56 @@ function renderSwitches(view){
 }
 async function loadSwitches(){ renderSwitches(await getJSON("/api/switches")); }
 
+// ---- 策略对照 v1：震荡 vs 顺势 ----
+function renderCompare(data){
+  const cards=$("#compare-cards"), events=$("#compare-events");
+  const live=data.strategies.filter(s=>s.available);
+  $("#compare-gap").textContent = data.gap===null ? "等待两个策略都产出数据"
+    : `震荡 − 顺势 = ${data.gap>=0?"+":""}${money(data.gap)}U`;
+  $("#compare-gap").className = "soft-pill " + (data.gap>0?"safe":data.gap<0?"warn":"");
+
+  cards.innerHTML = data.strategies.map(s=>{
+    if(!s.available) return `<article class="panel"><div class="panel-heading"><div><h2>未启动</h2>
+      <p>状态文件不存在：${esc(s.path)}</p></div></div>
+      <p class="muted">运行 <code>main.py strategy-comparison</code> 后这里才会有数据。</p></article>`;
+    const holds = s.positions.length
+      ? s.positions.map(p=>`<li><strong>${esc(p.symbol)}</strong> ${esc(p.side)}
+          入场 ${money(p.entry)} · 止损 ${money(p.stop)}${p.target?` · 目标 ${money(p.target)}`:""}</li>`).join("")
+      : "<li class='muted'>全部空仓</li>";
+    return `<article class="panel">
+      <div class="panel-heading">
+        <div><h2>${esc(s.strategy)} v${esc(s.version)}</h2><p>${esc(s.venue)}</p></div>
+        <span class="soft-pill ${s.pnl>=0?"safe":"warn"}">${s.pnl>=0?"+":""}${money(s.pnl)}U</span>
+      </div>
+      <div class="metric-grid">
+        <div><small>权益</small><strong>${money(s.equity)}U</strong></div>
+        <div><small>收益率</small><strong class="${trendClass(s.total_return)}">${pct(s.total_return)}</strong></div>
+        <div><small>最大回撤</small><strong>${pct(s.max_drawdown)}</strong></div>
+        <div><small>交易笔数</small><strong>${s.trades}</strong></div>
+        <div><small>胜率</small><strong>${(s.win_rate*100).toFixed(0)}%</strong></div>
+        <div><small>手续费</small><strong>${money(s.total_fees)}U</strong></div>
+      </div>
+      <ul class="plain-list">${holds}</ul>
+      <p class="muted">更新于 ${localTime(s.updated_at,true)}</p>
+    </article>`;
+  }).join("");
+
+  const rows=[];
+  live.forEach(s=>(s.events||[]).forEach(e=>rows.push({...e,strategy:s.strategy})));
+  rows.sort((a,b)=>String(b.time).localeCompare(String(a.time)));
+  events.innerHTML = rows.length ? `<table class="data-table"><thead><tr>
+      <th>时间</th><th>策略</th><th>动作</th><th>品种</th><th>方向</th>
+      <th class="num">价格</th><th class="num">盈亏</th><th>说明</th></tr></thead><tbody>` +
+    rows.slice(0,40).map(e=>`<tr>
+      <td>${localTime(e.time,true)}</td><td>${esc(e.strategy)}</td><td>${esc(e.kind)}</td>
+      <td>${esc(e.symbol)}</td><td>${esc(e.side)}</td>
+      <td class="num">${money(e.price)}</td>
+      <td class="num ${trendClass(e.pnl)}">${e.kind==="平仓"?(e.pnl>=0?"+":"")+money(e.pnl):"—"}</td>
+      <td>${esc(e.reason)}</td></tr>`).join("") + "</tbody></table>"
+    : "<p class='muted'>两个策略都还没有成交。策略按已收线K线决策，最快也要等到下一根15分钟收线。</p>";
+}
+async function loadCompare(){ renderCompare(await getJSON("/api/compare")); }
+
 document.addEventListener("DOMContentLoaded",()=>{
   const page=document.body.dataset.page;
   // 手动触发也走同一套记账，点刷新失败时同样会在页面上报错而不是静默。
@@ -370,6 +420,7 @@ document.addEventListener("DOMContentLoaded",()=>{
     $("#trade-prev").addEventListener("click",manual(()=>loadTrades(tradePage-1)));
     $("#trade-next").addEventListener("click",manual(()=>loadTrades(tradePage+1)));
   }
+  if(page==="compare"){startPolling(loadCompare,15000);}
   if(page==="system"){startPolling(loadSystem,60000);}
   if(page==="trading"){startPolling(loadSwitches,30000);}
 });

@@ -705,3 +705,76 @@ def build_entry_readiness() -> dict[str, Any]:
         "blackout": blackout.name if blackout else "",
         "accounts": accounts,
     }
+
+
+# ---------------------------------------------------------------- 策略对照 v1
+
+
+def build_strategy_comparison() -> dict:
+    """震荡 v1.0 与顺势 v1.0 的对照视图。
+
+    直接读两个策略服务落盘的状态 JSON，不查数据库——服务是唯一写入方，
+    Web 只读，两边不会打架。文件缺失说明服务还没跑过，如实说，不编空数据。
+    """
+    import json
+
+    from gold_crypto_quant.strategies_v1.live import (
+        RANGE_STATE_PATH,
+        TREND_STATE_PATH,
+    )
+
+    entries = []
+    for path in (RANGE_STATE_PATH, TREND_STATE_PATH):
+        if not path.exists():
+            entries.append({"available": False, "path": str(path)})
+            continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        account_pnl = raw["equity"] - raw["initial_equity"]
+        trades = raw.get("wins", 0) + raw.get("losses", 0)
+        entries.append(
+            {
+                "available": True,
+                "key": raw["key"],
+                "strategy": raw["strategy"],
+                "version": raw["version"],
+                "venue": raw["venue"],
+                "updated_at": raw["updated_at"],
+                "equity": round(raw["equity"], 2),
+                "initial_equity": round(raw["initial_equity"], 2),
+                "pnl": round(account_pnl, 2),
+                "total_return": (
+                    account_pnl / raw["initial_equity"] if raw["initial_equity"] else 0.0
+                ),
+                "max_drawdown": (
+                    1 - raw["equity"] / raw["peak_equity"] if raw.get("peak_equity") else 0.0
+                ),
+                "trades": trades,
+                "wins": raw.get("wins", 0),
+                "losses": raw.get("losses", 0),
+                "win_rate": (raw.get("wins", 0) / trades) if trades else 0.0,
+                "total_fees": round(raw.get("total_fees", 0.0), 2),
+                "positions": [
+                    {
+                        "symbol": symbol,
+                        "side": p["side"],
+                        "entry": round(p["entry_price"], 4),
+                        "stop": round(p["stop_price"], 4),
+                        "target": round(p.get("take_profit", 0.0), 4),
+                        "remaining": p["remaining"],
+                    }
+                    for symbol, p in (raw.get("positions") or {}).items()
+                ],
+                "events": list(reversed(raw.get("events", [])))[:30],
+                "params": raw.get("params", {}),
+            }
+        )
+
+    live = [e for e in entries if e.get("available")]
+    gap = None
+    if len(live) == 2:
+        gap = round(live[0]["pnl"] - live[1]["pnl"], 2)
+    return {
+        "strategies": entries,
+        "gap": gap,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }

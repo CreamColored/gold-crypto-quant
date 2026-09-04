@@ -145,6 +145,7 @@ def main() -> None:
             "market-runner",
             "market-runner-status",
             "public-market-comparison",
+            "strategy-comparison",
             "quote-collector",
             "web-init-admin",
             "web-run",
@@ -1135,6 +1136,16 @@ def main() -> None:
         except KeyboardInterrupt:
             _runtime_log("收到中断信号，正在冲刷剩余数据")
         return
+    if args.command == "strategy-comparison":
+        from gold_crypto_quant.runtime.strategy_v1_runner import run_strategy_comparison
+
+        run_strategy_comparison(
+            poll_seconds=args.poll_seconds,
+            max_cycles=args.max_cycles,
+            log_every_cycle=args.log_every_cycle,
+        )
+        return 0
+
     if args.command == "public-market-comparison":
         # 两个实盘公共行情源只进入隔离的本地影子账户，不读取任何交易所API密钥。
         create_schema()

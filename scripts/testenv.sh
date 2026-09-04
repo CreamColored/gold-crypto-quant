@@ -32,12 +32,15 @@ export SMTP_HOST=""
 export LIVE_TRADING="false"         # 影子模拟，永不下真单
 export GCQ_STATE_DIR="$STATE_DIR"   # 生产用 .runtime/
 
-# ---- 与服务器 systemd 单元保持一致的启动参数 ----
+# ---- 启动参数 ----
+# quant 跑的是震荡 v1.0 / 顺势 v1.0 的双策略对照，不再是 Gate/币安双交易所对照。
+# 策略按已收线K线决策，最小驱动周期 15m，所以 10 秒查一次游标就够，
+# 服务器上那套 1 秒轮询是给在途触轨用的，这里不需要。
 declare -a NAMES=(collector quant web)
 cmdline() {
   case "$1" in
     collector) echo "quote-collector" ;;
-    quant)     echo "public-market-comparison --limit 500 --poll-seconds 1 --max-cycles 604800" ;;
+    quant)     echo "strategy-comparison --poll-seconds 10 --max-cycles 604800" ;;
     web)       echo "web-run" ;;
     *) echo "未知服务：$1" >&2; return 1 ;;
   esac

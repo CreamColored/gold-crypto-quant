@@ -23,6 +23,7 @@ from gold_crypto_quant.storage.web_admin import (
     validate_password_strength,
 )
 from gold_crypto_quant.web.data import (
+    build_strategy_comparison,
     build_entry_readiness,
     build_live_quotes,
     build_market_chart,
@@ -246,6 +247,12 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             request, "accounts.html", page_context(request, user, "accounts")
         )
 
+    @app.get("/compare", response_class=HTMLResponse)
+    def compare_page(request: Request, user=Depends(current_admin)):
+        return templates.TemplateResponse(
+            request, "compare.html", page_context(request, user, "compare")
+        )
+
     @app.get("/system", response_class=HTMLResponse)
     def system_page(request: Request, user=Depends(current_admin)):
         return templates.TemplateResponse(
@@ -333,6 +340,10 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             page=page,
             page_size=page_size,
         )
+
+    @app.get("/api/compare")
+    def compare_api(_user=Depends(current_admin)):
+        return build_strategy_comparison()
 
     @app.get("/api/system")
     def system_api(request: Request, _user=Depends(current_admin)):

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}策略对照 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading compact-heading">
+  <div>
+    <p class="eyebrow">STRATEGY COMPARE</p>
+    <h1>震荡 v1.0 vs 顺势 v1.0</h1>
+    <p>同一份 Gate 行情、同一套执行引擎与手续费口径，差异只来自信号。真实交易始终关闭。</p>
+  </div>
+  <div id="compare-gap" class="soft-pill">—</div>
+</section>
+<section id="compare-cards" class="account-detail-grid">
+  <div class="skeleton tall"></div><div class="skeleton tall"></div>
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><h2>最近成交</h2><p>两个策略各自的开平仓事件</p></div></div>
+  <div id="compare-events" class="table-scroll"><div class="skeleton"></div></div>
+</section>
+{% endblock %}
