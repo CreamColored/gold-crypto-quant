@@ -8,8 +8,6 @@ from pathlib import Path
 from threading import Event
 
 from gold_crypto_quant.config import Settings
-from gold_crypto_quant.exchanges.binance import BinancePublicClient
-from gold_crypto_quant.exchanges.gate import GatePublicClient
 from gold_crypto_quant.market_data.binance_history import (
     BINANCE_LIVE_VENUE,
 )
@@ -17,20 +15,20 @@ from gold_crypto_quant.market_data.gate_history import (
     GATE_LIVE_VENUE,
     take_deadlock_retry_count,
 )
-from gold_crypto_quant.market_data.live_feed import (
-    refresh_binance_live_bars,
-    refresh_gate_live_bars,
-)
 from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
 from gold_crypto_quant.runtime.bollinger_signal_cycle import (
     BollingerSignalCycleSummary,
     run_bollinger_signal_cycle,
 )
+from gold_crypto_quant.storage.bar_source import SourceHealth, check_health
 from gold_crypto_quant.storage.market_health import refresh_market_health
+from gold_crypto_quant.storage.redis_bars import read_cursor
 from gold_crypto_quant.storage.shadow_monitor import record_shadow_cycle
 
 PUBLIC_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 PUBLIC_COMPARISON_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
+# 单轮超过这个秒数才算节奏丢失——策略按收线K线推进，跨过整根才会漏掉判定。
+CYCLE_OVERRUN_SECONDS = 30.0
 GATE_LIVE_STATE_PATH = Path(".runtime/bollinger-gate-live-paper-v5.json")
 BINANCE_LIVE_STATE_PATH = Path(".runtime/bollinger-binance-live-paper-v5.json")
 # 单轮耗时超过轮询间隔时的重复告警间隔；持续超时按这个周期节流，不逐轮刷屏。
@@ -113,7 +111,8 @@ class ComparisonFeedResult:
     """单个交易所一轮行情和影子策略结果。"""
 
     label: str
-    imported_bars: int
+    # 本轮K线取自哪一边；redis 为常态，mysql 说明采集服务的视图已陈旧。
+    source: str
     summary: BollingerSignalCycleSummary
 
 
@@ -139,13 +138,17 @@ class PublicMarketComparisonRunner:
         self.reporter = reporter or (lambda _message: None)
         self.notifier = RuntimeEventNotifier(settings, reporter=self.reporter)
         self._feed_watches: dict[str, FeedOutageWatch] = {}
-        self._duration_watch = CycleDurationWatch(poll_seconds)
-        # 每个交易所各记一份"该周期最近刷到哪根收线K线"。1小时线一小时才变一次，
-        # 旧路径每20秒重拉一遍，一天白问4300次；水位让到期的周期才发请求。
-        self._refreshed: dict[str, dict[str, datetime]] = {
+        # 阈值不再跟随 poll_seconds。1秒轮询下绝大多数轮次是空转，"单轮超过1秒"
+        # 不代表节奏丢失；真正的风险是单轮长到跨过整根1分钟K线。
+        self._duration_watch = CycleDurationWatch(CYCLE_OVERRUN_SECONDS)
+        # 上一轮看到的收线水位。cursor 没变说明没有新K线，整轮跳过——1秒轮询下
+        # 60轮里有59轮属于这种情况，跳过后单轮只花一次 HGETALL 约0.5毫秒。
+        self._last_cursor: dict[str, dict[str, str]] = {
             GATE_LIVE_VENUE: {},
             BINANCE_LIVE_VENUE: {},
         }
+        # 已经就降级发过告警的交易所，避免每秒重复推送。
+        self._degraded: set[str] = set()
 
     def _notify(self, key: str, title: str, lines: tuple[str, ...], severity: str) -> None:
         """发送带对照服务前缀的事件；邮件失败不改变影子账户。"""
@@ -163,8 +166,46 @@ class PublicMarketComparisonRunner:
             ),
         )
 
-    def _run_feed(self, label: str, fetch, venue: str, state_path: Path) -> tuple:
-        """跑完一个交易所的完整流水线：拉行情、健康检查、策略、落库。
+    def _cursor_advanced(self, venue: str) -> tuple[bool, SourceHealth]:
+        """本轮有没有新收线K线，以及 Redis 视图是否新鲜。
+
+        每秒只读一个 Hash 就能回答"有没有新K线"，命中率约1/60；没变就不去读整份
+        K线也不跑策略，59/60 的轮次因此只花约0.5毫秒。
+        """
+        health = check_health(venue)
+        if health.degraded:
+            # 降级期间无法用 cursor 判断，每轮都跑；MySQL 那条路径本来就是旧节奏。
+            return True, health
+        try:
+            cursor = {k: v for k, v in read_cursor(venue).items() if k != "_heartbeat"}
+        except Exception:  # noqa: BLE001 - 读不到就当有变化，宁可多跑一轮
+            return True, health
+        changed = cursor != self._last_cursor[venue]
+        if changed:
+            self._last_cursor[venue] = cursor
+        return changed, health
+
+    def _report_source(self, label: str, venue: str, health: SourceHealth) -> None:
+        """降级和恢复各推一次，不按轮重复。"""
+        if health.degraded and venue not in self._degraded:
+            self._degraded.add(venue)
+            self._notify(
+                "source-degraded",
+                f"{label}行情源降级",
+                (f"原因：{health.reason}", "已切换为直接读取 MySQL，策略继续运行"),
+                "WARNING",
+            )
+        elif not health.degraded and venue in self._degraded:
+            self._degraded.discard(venue)
+            self._notify(
+                "source-recovered",
+                f"{label}行情源恢复",
+                ("采集服务心跳恢复，已切回 Redis",),
+                "INFO",
+            )
+
+    def _run_feed(self, label: str, venue: str, state_path: Path, health: SourceHealth) -> tuple:
+        """跑一个交易所的策略流水线。行情拉取已搬到采集服务，这里只消费。
 
         两个交易所之间没有任何共享可变状态——不同的 instrument、不同的影子账户
         状态文件、不同的监管表行——因此可以并行。策略那一步在 venue 内部仍然串行：
@@ -174,18 +215,14 @@ class PublicMarketComparisonRunner:
         started = datetime.now(UTC)
         result: ComparisonFeedResult | None = None
         try:
-            imports = fetch()
             self._refresh_health(venue)
             summary = run_bollinger_signal_cycle(
                 symbols=PUBLIC_COMPARISON_CONTRACTS,
                 venue=venue,
                 state_path=state_path,
+                source_health=health,
             )
-            result = ComparisonFeedResult(
-                label,
-                sum(item.stored for item in imports),
-                summary,
-            )
+            result = ComparisonFeedResult(label, health.source, summary)
             # 保存该交易所独立的影子权益与交易事件，Web后台只读这些监管数据。
             record_shadow_cycle(venue, state_path, summary)
             self._report_feed_recovered(label)
@@ -197,10 +234,10 @@ class PublicMarketComparisonRunner:
         """单轮耗时超过轮询间隔即告警，持续超时按冷却期节流，回落后发恢复通知。"""
         action = self._duration_watch.observe(elapsed, datetime.now(UTC))
         streak = self._duration_watch.streak
-        if elapsed > self.poll_seconds:
+        if elapsed > CYCLE_OVERRUN_SECONDS:
             # 无论告警是否被节流掉，日志每轮都留痕，便于事后回溯超时是从哪一轮开始的。
             self.reporter(
-                f"单轮耗时{elapsed:.1f}秒，超过轮询间隔{self.poll_seconds:.0f}秒"
+                f"单轮耗时{elapsed:.1f}秒，超过{CYCLE_OVERRUN_SECONDS:.0f}秒告警阈值"
                 f"（连续第{streak}轮）"
             )
         if action == "overrun":
@@ -209,7 +246,7 @@ class PublicMarketComparisonRunner:
                 "单轮耗时超过轮询间隔",
                 (
                     f"本轮耗时：{elapsed:.1f} 秒",
-                    f"配置轮询间隔：{self.poll_seconds:.0f} 秒",
+                    f"轮询间隔：{self.poll_seconds:g} 秒，告警阈值 {CYCLE_OVERRUN_SECONDS:.0f} 秒",
                     f"连续超时轮数：{streak}（达到{CYCLE_OVERRUN_ALERT_STREAK}轮才告警）",
                     "影响：循环已退化成只等0.1秒，行情处理不再有固定节奏",
                     f"重复告警间隔：{CYCLE_OVERRUN_ALERT_COOLDOWN.total_seconds() / 60:.0f} 分钟",
@@ -222,7 +259,7 @@ class PublicMarketComparisonRunner:
                 "单轮耗时恢复正常",
                 (
                     f"本轮耗时：{elapsed:.1f} 秒",
-                    f"配置轮询间隔：{self.poll_seconds:.0f} 秒",
+                    f"轮询间隔：{self.poll_seconds:g} 秒，告警阈值 {CYCLE_OVERRUN_SECONDS:.0f} 秒",
                 ),
                 "RECOVERED",
             )
@@ -359,78 +396,74 @@ class PublicMarketComparisonRunner:
             ("Gate实盘公共行情：启用", "币安实盘公共行情：启用", "API密钥：不需要"),
             "INFO",
         )
-        with GatePublicClient() as gate, BinancePublicClient() as binance:
-            while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
-                cycle_started = datetime.now(UTC)
-                # 两个交易所并行；HTTP往返占单轮近四成，串行等于白白多等一份。
-                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="feed") as pool:
-                    gate_future = pool.submit(
-                        self._run_feed,
-                        "Gate",
-                        lambda: refresh_gate_live_bars(
-                            gate,
-                            contracts=PUBLIC_COMPARISON_CONTRACTS,
-                            intervals=PUBLIC_COMPARISON_INTERVALS,
-                            refreshed=self._refreshed[GATE_LIVE_VENUE],
-                            limit=self.limit,
-                            venue=GATE_LIVE_VENUE,
-                        ),
-                        GATE_LIVE_VENUE,
-                        GATE_LIVE_STATE_PATH,
-                    )
-                    binance_future = pool.submit(
-                        self._run_feed,
-                        "币安",
-                        lambda: refresh_binance_live_bars(
-                            binance,
-                            contracts=PUBLIC_COMPARISON_CONTRACTS,
-                            intervals=PUBLIC_COMPARISON_INTERVALS,
-                            refreshed=self._refreshed[BINANCE_LIVE_VENUE],
-                            limit=self.limit,
-                        ),
-                        BINANCE_LIVE_VENUE,
-                        BINANCE_LIVE_STATE_PATH,
-                    )
-                    gate_result, gate_seconds = gate_future.result()
-                    binance_result, binance_seconds = binance_future.result()
-                # 顺序固定为 Gate 在前，摘要与权益差的口径不随线程完成先后变化。
-                feed_results = [item for item in (gate_result, binance_result) if item is not None]
+        while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
+            cycle_started = datetime.now(UTC)
+            # 先判断有没有新收线K线；两边都没有就整轮跳过，不读K线也不跑策略。
+            plans = []
+            for label, venue, state_path in (
+                ("Gate", GATE_LIVE_VENUE, GATE_LIVE_STATE_PATH),
+                ("币安", BINANCE_LIVE_VENUE, BINANCE_LIVE_STATE_PATH),
+            ):
+                advanced, health = self._cursor_advanced(venue)
+                self._report_source(label, venue, health)
+                if advanced:
+                    plans.append((label, venue, state_path, health))
+            if not plans:
+                self.stop_event.wait(self.poll_seconds)
+                continue
 
-                completed_cycles += 1
-                comparison_status_lines = self._comparison_status_lines(feed_results)
-                for item in feed_results:
-                    venue = GATE_LIVE_VENUE if item.label == "Gate" else BINANCE_LIVE_VENUE
-                    self._report_strategy_events(
-                        item.label,
-                        venue,
-                        item.summary,
-                        comparison_status_lines,
-                    )
-                # 计时必须包含通知发送：钉钉和SMTP都是网络调用，属于本轮真实开销。
-                elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
-                # 两个交易所并行，各自耗时会重叠，因此总耗时不等于两者相加。
-                # 死锁重试成功不会报错，不显式打出来就分不清"没发生"和"被吞了"。
-                retries = take_deadlock_retry_count()
-                retry_note = f"；死锁重试{retries}次" if retries else ""
-                timing = (
-                    f"耗时{elapsed:.1f}秒"
-                    f"（并行：Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
-                    f"，通知 {elapsed - max(gate_seconds, binance_seconds):.1f}）"
-                    f"{retry_note}"
+            gate_result = binance_result = None
+            gate_seconds = binance_seconds = 0.0
+            # 两个交易所之间没有共享可变状态，并行；策略在 venue 内部仍串行。
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="feed") as pool:
+                futures = {
+                    label: pool.submit(self._run_feed, label, venue, state_path, health)
+                    for label, venue, state_path, health in plans
+                }
+                for label, future in futures.items():
+                    result, seconds = future.result()
+                    if label == "Gate":
+                        gate_result, gate_seconds = result, seconds
+                    else:
+                        binance_result, binance_seconds = result, seconds
+            # 顺序固定为 Gate 在前，摘要与权益差的口径不随线程完成先后变化。
+            feed_results = [item for item in (gate_result, binance_result) if item is not None]
+
+            completed_cycles += 1
+            comparison_status_lines = self._comparison_status_lines(feed_results)
+            for item in feed_results:
+                venue = GATE_LIVE_VENUE if item.label == "Gate" else BINANCE_LIVE_VENUE
+                self._report_strategy_events(
+                    item.label,
+                    venue,
+                    item.summary,
+                    comparison_status_lines,
                 )
-                if feed_results:
-                    details = "；".join(
-                        f"{item.label}刷新{item.imported_bars}根、权益"
-                        f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
-                        for item in feed_results
-                    )
-                    self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}；{timing}")
-                else:
-                    self.reporter(
-                        f"双行情对照第{completed_cycles}轮：两个行情源均失败；{timing}"
-                    )
-                self._report_cycle_duration(elapsed)
-                self.stop_event.wait(max(0.1, self.poll_seconds - elapsed))
+            # 计时必须包含通知发送：钉钉和SMTP都是网络调用，属于本轮真实开销。
+            elapsed = (datetime.now(UTC) - cycle_started).total_seconds()
+            # 两个交易所并行，各自耗时会重叠，因此总耗时不等于两者相加。
+            # 死锁重试成功不会报错，不显式打出来就分不清"没发生"和"被吞了"。
+            retries = take_deadlock_retry_count()
+            retry_note = f"；死锁重试{retries}次" if retries else ""
+            timing = (
+                f"耗时{elapsed:.1f}秒"
+                f"（并行：Gate {gate_seconds:.1f} / 币安 {binance_seconds:.1f}"
+                f"，通知 {elapsed - max(gate_seconds, binance_seconds):.1f}）"
+                f"{retry_note}"
+            )
+            if feed_results:
+                details = "；".join(
+                    f"{item.label}[{item.source}]权益"
+                    f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
+                    for item in feed_results
+                )
+                self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}；{timing}")
+            else:
+                self.reporter(
+                    f"双行情对照第{completed_cycles}轮：两个行情源均失败；{timing}"
+                )
+            self._report_cycle_duration(elapsed)
+            self.stop_event.wait(max(0.1, self.poll_seconds - elapsed))
 
         self._notify(
             "stopped",

@@ -57,8 +57,10 @@ RECONNECT_BACKOFF = (1.0, 2.0, 5.0, 10.0, 20.0)
 SECOND_FLUSH_INTERVAL = 1.0
 # 每秒把在途K线推给 Redis；策略据此在分钟内也能看到价格变化。
 PROVISIONAL_PUBLISH_INTERVAL = 1.0
-# K线刷新循环的节拍。真正发请求由 live_refresh 的周期水位决定，这里只是检查频率。
-BAR_REFRESH_INTERVAL = 2.0
+# 收线后等这么久再拉。所有周期（1m/5m/15m/30m/1h）都对齐UTC整分边界，因此只要在
+# 每个整分之后醒一次就够；固定节拍会平均多等半个节拍，而这段延迟直接加在
+# "收线到策略做出判断"的链路上。留0.3秒是给交易所自己的收线写入留余量。
+BAR_CLOSE_SETTLE_SECONDS = 0.3
 PUBLIC_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 
 
@@ -497,9 +499,21 @@ class QuoteCollector:
                 self.reporter(f"在途K线循环异常：{type(error).__name__}: {error}")
 
     async def _bar_refresh_loop(self) -> None:
-        """定期检查有没有周期收线；真正发请求由周期水位决定。"""
+        """在每个整分边界之后拉一次到期周期的K线。
+
+        对齐边界而不是固定节拍：固定2秒一跳平均要多等1秒才发现收线，而这段延迟
+        直接加在"收线到策略做出判断"的链路上。所有周期都对齐UTC整分，因此每分钟
+        醒一次就覆盖了全部。
+        """
         while not self._stopping.is_set():
-            await asyncio.sleep(BAR_REFRESH_INTERVAL)
+            now = datetime.now(UTC)
+            nxt = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            delay = (nxt - now).total_seconds() + BAR_CLOSE_SETTLE_SECONDS
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=delay)
+                return
+            except TimeoutError:
+                pass
             try:
                 await asyncio.to_thread(self.refresh_bars)
             except Exception as error:  # noqa: BLE001 - 拉取失败不能中断盘口采集

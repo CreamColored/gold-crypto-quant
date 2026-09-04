@@ -8,7 +8,7 @@ from gold_crypto_quant.runtime.bollinger_rotation_simulator import RotationPaper
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     run_multi_timeframe_paper_cycle,
 )
-from gold_crypto_quant.storage.market_bars import load_market_bars
+from gold_crypto_quant.storage.bar_source import SourceHealth, check_health, load_bars
 from gold_crypto_quant.storage.market_health import refresh_market_health
 from gold_crypto_quant.storage.trading_switches import load_switches, resolve_entry_allowed
 
@@ -35,8 +35,14 @@ def run_bollinger_signal_cycle(
     bar_limit_15m: int = 300,
     venue: str = GATE_TESTNET_VENUE,
     state_path: Path | None = None,
+    source_health: SourceHealth | None = None,
 ) -> BollingerSignalCycleSummary:
-    """按周期优先级运行BTC/ETH共享资金、全局单持仓影子账户。"""
+    """按周期优先级运行BTC/ETH共享资金、全局单持仓影子账户。
+
+    ``source_health`` 决定这一轮从 Redis 还是 MySQL 取K线；不传则自行判定，方便
+    脚本和测试直接调用。
+    """
+    source_health = source_health or check_health(venue)
     health_by_stream = {
         (symbol, interval): refresh_market_health(symbol, interval, venue=venue)
         for symbol in symbols
@@ -57,30 +63,21 @@ def run_bollinger_signal_cycle(
     bars_by_symbol = {
         symbol: {
             # 5分钟是最高优先级震荡周期；确认走平后由1分钟行情负责触轨即时开仓。
-            "5m": load_market_bars(
-                symbol,
-                "5m",
-                limit=max(500, bar_limit_5m),
-                venue=venue,
+            "5m": load_bars(
+                symbol, "5m", venue=venue, limit=max(500, bar_limit_5m), health=source_health
             ),
-            "15m": load_market_bars(
-                symbol,
-                "15m",
-                limit=max(300, bar_limit_15m),
-                venue=venue,
+            "15m": load_bars(
+                symbol, "15m", venue=venue, limit=max(300, bar_limit_15m), health=source_health
             ),
-            "30m": load_market_bars(symbol, "30m", limit=300, venue=venue),
-            "1h": load_market_bars(symbol, "1h", limit=300, venue=venue),
+            "30m": load_bars(symbol, "30m", venue=venue, limit=300, health=source_health),
+            "1h": load_bars(symbol, "1h", venue=venue, limit=300, health=source_health),
         }
         for symbol in symbols
     }
     # 1分钟只供开仓过滤；状态机内部按UTC自然边界聚合3分钟，不加入交易周期优先级。
     micro_bars_by_symbol = {
-        symbol: load_market_bars(
-            symbol,
-            "1m",
-            limit=max(500, bar_limit_5m),
-            venue=venue,
+        symbol: load_bars(
+            symbol, "1m", venue=venue, limit=max(500, bar_limit_5m), health=source_health
         )
         for symbol in symbols
     }
