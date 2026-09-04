@@ -20,6 +20,7 @@ dependencies = [
     "psutil>=7.2,<8",
     "sqlalchemy>=2.0,<3",
     "python-multipart>=0.0.20,<1",
+    "redis>=6.4,<7",
     "uvicorn[standard]>=0.35,<1",
     "vectorbt>=1.1,<2",
 ]

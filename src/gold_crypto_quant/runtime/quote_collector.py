@@ -29,6 +29,7 @@ from gold_crypto_quant.market_data.binance_history import BINANCE_LIVE_VENUE, IN
 from gold_crypto_quant.market_data.gate_history import GATE_LIVE_VENUE
 from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument, MarketQuoteMinute, MarketQuoteSecond
+from gold_crypto_quant.storage.redis_client import build_redis, quote_key
 
 QUOTE_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 BINANCE_WS_URL = "wss://fstream.binance.com/stream?streams="
@@ -166,6 +167,41 @@ class QuoteCollector:
             rows.append((venue, contract, minute, bucket, covered))
         return rows
 
+    def _publish_snapshots(self, drained: list[tuple]) -> None:
+        """把每个品种最新一秒的盘口写进 Redis，供策略与前端读当前价。
+
+        只写每个品种的**最后一秒**：Redis 这份是快照不是流水，历史在 MySQL。键数固定
+        为交易所×品种，写多久都不增长——不需要靠读取方活着来控制内存。
+
+        Redis 不可用绝不能影响采集：这里吞掉异常只记一行日志，MySQL 那条链路照常。
+        Redis 存的全部是可重建的热数据，丢了下一秒就补回来。
+        """
+        if not drained:
+            return
+        latest: dict[tuple[str, str], tuple[datetime, QuoteBucket]] = {}
+        for venue, contract, bucket_time, bucket in drained:
+            key = (venue, contract)
+            if key not in latest or bucket_time > latest[key][0]:
+                latest[key] = (bucket_time, bucket)
+        try:
+            client = build_redis()
+            pipe = client.pipeline(transaction=False)
+            for (venue, contract), (bucket_time, bucket) in latest.items():
+                pipe.hset(
+                    quote_key(venue, contract),
+                    mapping={
+                        "bid": bucket.bid_close,
+                        "ask": bucket.ask_close,
+                        # 陈旧度判定用的是这个时间戳。采集服务挂掉后 Redis 里的键还在、
+                        # 值还是旧的，读取端不会收到任何错误——只能靠时间戳发现。
+                        "ts": bucket_time.isoformat(),
+                        "frames": bucket.frame_count,
+                    },
+                )
+            pipe.execute()
+        except Exception as error:  # noqa: BLE001 - Redis 故障不能拖垮采集
+            self.reporter(f"Redis快照写入失败：{type(error).__name__}: {error}")
+
     def _write(self, table, rows: list[dict]) -> None:
         if not rows:
             return
@@ -189,6 +225,7 @@ class QuoteCollector:
     def flush(self, now: datetime | None = None) -> tuple[int, int]:
         """把走完的秒桶与分钟桶落盘，返回写入行数。"""
         now = now or datetime.now(UTC)
+        drained = self.drain_seconds(now)
         seconds = [
             {
                 "instrument_id": self._instrument_ids[(venue, contract)],
@@ -198,8 +235,9 @@ class QuoteCollector:
                 "bid_close": bucket.bid_close, "ask_close": bucket.ask_close,
                 "frame_count": bucket.frame_count,
             }
-            for venue, contract, bucket_time, bucket in self.drain_seconds(now)
+            for venue, contract, bucket_time, bucket in drained
         ]
+        self._publish_snapshots(drained)
         minutes = [
             {
                 "instrument_id": self._instrument_ids[(venue, contract)],

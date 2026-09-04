@@ -7,14 +7,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """从默认值和本地 ``.env`` 加载配置。
+    """从默认值、``.env`` 与 ``.env.local`` 加载配置。
 
-    环境变量优先于代码默认值；密钥和密码只允许保存在被 Git 忽略的 ``.env`` 中。
+    优先级：环境变量 > ``.env.local`` > ``.env`` > 代码默认值。
+
+    ``.env`` 在本仓库里是被 Git 跟踪的（私有仓库，历史凭据不轮换）。新增的密码优先
+    放 ``.env.local``——它在 ``.gitignore`` 里，密码不会进版本历史。已在库里的旧凭据
+    保持原位，把它们挪走并不能把历史里的记录抹掉，徒增改动面。
     """
 
-    # Pydantic Settings 会自动读取项目根目录的 .env，并忽略暂未使用的扩展字段。
+    # 同名键以后一个文件为准，因此 .env.local 覆盖 .env。
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -52,6 +56,15 @@ class Settings(BaseSettings):
     # 钉钉自定义机器人：Webhook与加签密钥都留空时完全禁用，不影响邮件通道。
     dingtalk_webhook: str | None = None
     dingtalk_secret: SecretStr | None = None
+
+    # Redis 承载策略进程要读的实时K线与现价快照；留空密码即视为免认证实例。
+    # 采集服务写、双行情读，两边共用同一份连接配置。
+    redis_host: str = "127.0.0.1"
+    redis_port: int = Field(default=6379, ge=1, le=65535)
+    redis_db: int = Field(default=0, ge=0, le=15)
+    redis_password: SecretStr | None = None
+    # 所有键统一前缀，和同一实例上其它应用的键空间隔开。
+    redis_key_prefix: str = "gcq"
 
     # Gate 测试网与实盘使用不同密钥，SecretStr 可防止日志意外打印完整密钥。
     gate_testnet_api_key: SecretStr | None = None

@@ -20,3 +20,6 @@ claude-handoff-*.zip
 var/backups/
 var/replay/
 var/network/
+
+# 新增密码只放本地，不进版本历史
+.env.local
