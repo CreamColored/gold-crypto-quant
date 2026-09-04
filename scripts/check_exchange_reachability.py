@@ -4,7 +4,7 @@
 
     .venv/bin/python scripts/check_exchange_reachability.py
 
-用项目自己的交易所客户端发请求，与双行情服务走完全相同的代码路径和代理设置，
+用项目自己的交易所客户端发请求，与量化服务走完全相同的代码路径和代理设置，
 因此结论可以直接套用到线上；用 curl 另测可能因为代理规则不同而得出不一致的结果。
 """
 
@@ -93,7 +93,7 @@ def main() -> int:
             },
         )
     both = gate_ok and binance_ok
-    verdict = "两个交易所都可用" if both else "该节点不满足双行情对照"
+    verdict = "两个交易所都可用" if both else "该节点不满足双所对照"
     print(
         f"\n结论：Gate {'✅' if gate_ok else '❌'}　"
         f"币安 {'✅' if binance_ok else '❌'}　→ {verdict}"

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     dingtalk_secret: SecretStr | None = None
 
     # Redis 承载策略进程要读的实时K线与现价快照；留空密码即视为免认证实例。
-    # 采集服务写、双行情读，两边共用同一份连接配置。
+    # 采集服务写、量化服务读，两边共用同一份连接配置。
     redis_host: str = "127.0.0.1"
     redis_port: int = Field(default=6379, ge=1, le=65535)
     redis_db: int = Field(default=0, ge=0, le=15)

@@ -41,7 +41,7 @@ class RuntimeEventNotifier:
         self.settings = settings
         # 推送失败不能影响交易主流程，但必须在日志里留痕；静默吞掉会让通道坏了都没人知道。
         self.reporter = reporter or (lambda _message: None)
-        # 双行情服务并行跑两个交易所时共用本对象：_sent_keys 去重、钉钉滑动窗口限流
+        # 量化服务并行跑两个交易所时共用本对象：_sent_keys 去重、钉钉滑动窗口限流
         # 和邮件游标都是读改写，必须串行化，否则限流可能被同时放行而触发平台封禁。
         self._lock = Lock()
         self.enabled = bool(settings.status_email_to)

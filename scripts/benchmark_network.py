@@ -9,7 +9,7 @@
     .venv/bin/python scripts/benchmark_network.py --compare
 
 测的是这套系统实际依赖的三件事：
-1. REST K线延迟——双行情服务每轮要发30次，中位数直接乘以30就是每轮的HTTP开销
+1. REST K线延迟——量化服务每轮要发30次，中位数直接乘以30就是每轮的HTTP开销
 2. WebSocket 帧率——盘口采集器的数据密度，帧率低意味着秒级极值更容易漏掉插针
 3. 失败率——比延迟更要紧，2026-09-03 下午币安那次 ProxyError 503 就是链路问题
 
@@ -152,7 +152,7 @@ async def run(label: str) -> dict:
     cycle = sum(
         item["median_ms"] for item in rest.values() if item.get("median_ms")
     ) / max(1, len([i for i in rest.values() if i.get("median_ms")]))
-    print(f"\n推算：双行情服务每轮30次HTTP，按中位 {cycle:.0f} ms 计约 {cycle * 30 / 1000:.1f} 秒")
+    print(f"\n推算：量化服务每轮30次HTTP，按中位 {cycle:.0f} ms 计约 {cycle * 30 / 1000:.1f} 秒")
     return payload
 
 

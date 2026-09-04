@@ -1175,8 +1175,11 @@ def main() -> None:
         previous_gate_risk_state: str | None = None
         previous_signal_status: str | None = None
 
+        # 启停属于日常操作，每次重启都推会让真正的异常淹在里面；异常与恢复照常推。
+        SILENT_LIFECYCLE_EVENTS = {"SERVICE_STARTED", "SERVICE_STOPPED"}
+
         def report_runtime_event(event: str, detail: str) -> None:
-            """把行情服务生命周期事件转换为即时邮件，重复重试不会逐分钟刷屏。"""
+            """把行情服务异常事件转换为即时邮件，重复重试不会逐分钟刷屏。"""
             titles = {
                 "SERVICE_STARTED": ("Gate行情服务启动", "INFO"),
                 "SERVICE_RETRYING": ("Gate行情服务异常", "CRITICAL"),
@@ -1184,6 +1187,9 @@ def main() -> None:
                 "SERVICE_STOPPED": ("Gate行情服务停止", "WARNING"),
             }
             title, severity = titles.get(event, (event, "WARNING"))
+            if event in SILENT_LIFECYCLE_EVENTS:
+                _runtime_log(f"{title}（启停不推送）：{detail}")
+                return
             sent = event_notifier.send(
                 event_key=f"runtime:{event}",
                 event_title=title,

@@ -1045,7 +1045,7 @@ class TradingAccount(Base):
 
 
 class ShadowEquitySnapshot(Base):
-    """双行情影子账户的权益时间序列，供Web曲线和回撤统计使用。"""
+    """量化服务影子账户的权益时间序列，供Web曲线和回撤统计使用。"""
 
     __tablename__ = "shadow_equity_snapshots"
     __table_args__ = (

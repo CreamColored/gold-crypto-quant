@@ -1,5 +1,6 @@
 """事件分流测试：成交只推钉钉，系统事件才进邮箱。"""
 
+import inspect
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from pydantic import SecretStr
 from gold_crypto_quant.config import Settings
 from gold_crypto_quant.notifications.dingtalk_bot import DingtalkError
 from gold_crypto_quant.notifications.runtime_events import RuntimeEventNotifier
+from gold_crypto_quant.runtime import public_market_comparison_runner as runner
 from gold_crypto_quant.storage.trade_events import PaperTradeEvent
 
 
@@ -196,3 +198,24 @@ def test_dingtalk_rate_limit_drop_is_logged(monkeypatch) -> None:
 
     assert len(logged) == 1
     assert "钉钉推送被本地限流丢弃" in logged[0]
+"""服务启停不推送的行为锁定。
+
+重启是日常操作——今天一天就重启了六七次。每次都推邮件和钉钉，真正的异常（行情
+中断、单轮超时、Redis降级）会淹在这些噪声里。日志仍然留痕。
+"""
+
+def test_runner_does_not_notify_on_start_or_stop() -> None:
+    source = inspect.getsource(runner.PublicMarketComparisonRunner.run)
+    assert '"started"' not in source
+    assert '"stopped"' not in source
+    # 日志必须还在，否则重启就完全无痕
+    assert "量化服务启动" in source
+    assert "量化服务停止" in source
+
+
+def test_anomaly_alerts_are_kept() -> None:
+    """行情中断、单轮超时、Redis降级这些异常告警不受影响。"""
+    source = inspect.getsource(runner)
+    for key in ("source-degraded", "source-recovered", "cycle-overrun", "cycle-duration-recovered"):
+        assert f'"{key}"' in source
+    assert "feed" in source

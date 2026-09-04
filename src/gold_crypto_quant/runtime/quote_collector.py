@@ -235,7 +235,7 @@ class QuoteCollector:
     def refresh_bars(self) -> int:
         """拉取到期周期的官方K线，写 MySQL 与 Redis。
 
-        这一步原先在双行情进程里。搬过来之后策略进程不再持有交易所客户端，采集与
+        这一步原先在量化服务进程里。搬过来之后策略进程不再持有交易所客户端，采集与
         策略彻底分开：拉取失败只影响这个进程，策略靠 Redis 陈旧度降级读 MySQL 继续跑。
         """
         total = 0

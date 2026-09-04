@@ -57,6 +57,7 @@ def load_bars(end: pd.Timestamp):
 def run(
     tag, minutes, main, micro, state_dir, *,
     disable_structure, reward_risk=0.0, seconds=None, dwell=3.0, second_step=1,
+    legacy_params=False,
 ):
     """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。
 
@@ -68,6 +69,19 @@ def run(
     if disable_structure:
         sim._has_top_structure = lambda *_a, **_k: False
         sim._has_bottom_structure = lambda *_a, **_k: False
+    # V5.7 的参数原地打回去；这些常量都在调用时才从模块读取，改模块属性即可生效。
+    legacy_original = (
+        sim.ENTRY_INTERVAL_PRIORITY, sim.MIDDLE_REDUCE_RATIO,
+        sim.FIXED_STOP_DISTANCE, sim.OTHER_SYMBOL_STOP_RETURN,
+    )
+    if legacy_params:
+        sim.ENTRY_INTERVAL_PRIORITY = sim.INTERVAL_PRIORITY
+        sim.MIDDLE_REDUCE_RATIO = 0.50
+        sim.FIXED_STOP_DISTANCE = {
+            "BTC_USDT": {"5m": 250.0, "15m": 250.0, "30m": 500.0, "1h": 500.0},
+            "ETH_USDT": {"5m": 5.0, "15m": 5.0, "30m": 10.0, "1h": 10.0},
+        }
+        sim.OTHER_SYMBOL_STOP_RETURN = 0.40
     state_path = state_dir / f"state-{tag}.json"
     state_path.unlink(missing_ok=True)
     events, equity = [], 10_000.0
@@ -124,6 +138,12 @@ def run(
                 print(f"  {tag} {now} 权益 {equity:.2f} 事件 {len(events)}", flush=True)
     finally:
         sim._has_top_structure, sim._has_bottom_structure = original
+        (
+            sim.ENTRY_INTERVAL_PRIORITY, sim.MIDDLE_REDUCE_RATIO,
+            sim.FIXED_STOP_DISTANCE, sim.OTHER_SYMBOL_STOP_RETURN,
+        ) = legacy_original
+        # 参数变了，指标与K线缓存的键里不含这些常量，必须整体作废。
+        sim.reset_context_cache()
     return [
         {"title": item.title, "lines": list(item.lines), "severity": item.severity}
         for item in events
@@ -187,6 +207,11 @@ def parse_arguments(argv):
         type=float,
         default=0.0,
         help="开仓赔率门槛：到中轨距离 ÷ 止损距离 低于该值就不开单，0=不启用",
+    )
+    parser.add_argument(
+        "--legacy-params",
+        action="store_true",
+        help="用 V5.7 的参数跑（5m参与开仓、中轨减仓50%、旧止损距离），用于新旧对照",
     )
     parser.add_argument(
         "--until",
@@ -275,6 +300,7 @@ def main(argv=None) -> int:
             tag, minutes, main_bars, micro_bars, target,
             disable_structure=disabled, reward_risk=args.reward_risk,
             seconds=seconds, dwell=args.dwell, second_step=max(1, args.second_step),
+            legacy_params=args.legacy_params,
         )
         trades = ledger(events)
         opening_equity = 10_000.0

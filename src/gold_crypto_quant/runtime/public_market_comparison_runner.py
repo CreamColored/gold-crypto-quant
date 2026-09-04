@@ -154,12 +154,12 @@ class PublicMarketComparisonRunner:
         """发送带对照服务前缀的事件；邮件失败不改变影子账户。"""
         self.notifier.send(
             event_key=f"public-comparison:{key}",
-            event_title=f"双行情对照：{title}",
+            event_title=f"量化服务：{title}",
             event_lines=lines,
             severity=severity,
             repeatable=True,
             comparison_status_lines=(
-                "运行模式：Gate＋币安双行情对照",
+                "运行模式：Gate＋币安双所对照",
                 "账户关系：同策略、同初始资金、独立行情、独立仓位",
                 "真实交易：False",
                 "交易所订单提交：False",
@@ -323,7 +323,7 @@ class PublicMarketComparisonRunner:
             repeatable=True,
             comparison_status_lines=(
                 f"{label}行情：HEALTHY",
-                "双行情对照：继续运行",
+                "量化服务：继续运行",
                 "真实交易：False",
                 "交易所订单提交：False",
             ),
@@ -404,12 +404,9 @@ class PublicMarketComparisonRunner:
     def run(self) -> int:
         """运行最多七天；任一交易所短暂失败不会停止另一套影子账户。"""
         completed_cycles = 0
-        self._notify(
-            "started",
-            "服务启动",
-            ("Gate实盘公共行情：启用", "币安实盘公共行情：启用", "API密钥：不需要"),
-            "INFO",
-        )
+        # 启停不再推送邮件和钉钉：重启是日常操作，每次都推会让真正的异常淹在里面。
+        # 日志仍然留痕，行情中断、单轮超时、Redis降级这些异常告警照常发。
+        self.reporter("量化服务启动：Gate与币安实盘公共行情，不需要API密钥")
         while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
             cycle_started = datetime.now(UTC)
             # 每秒都跑：在途K线每秒变一次，触轨的停留确认要靠逐秒复查才能计时。
@@ -476,18 +473,13 @@ class PublicMarketComparisonRunner:
                     f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
                     for item in feed_results
                 )
-                self.reporter(f"双行情对照第{completed_cycles}轮完成：{details}；{timing}")
+                self.reporter(f"量化服务第{completed_cycles}轮完成：{details}；{timing}")
             elif not feed_results:
                 self.reporter(
-                    f"双行情对照第{completed_cycles}轮：两个行情源均失败；{timing}"
+                    f"量化服务第{completed_cycles}轮：两个行情源均失败；{timing}"
                 )
             self._report_cycle_duration(elapsed)
             self.stop_event.wait(max(0.1, self.poll_seconds - elapsed))
 
-        self._notify(
-            "stopped",
-            "服务停止",
-            (f"成功调度轮数：{completed_cycles}",),
-            "WARNING",
-        )
+        self.reporter(f"量化服务停止：成功调度 {completed_cycles} 轮")
         return completed_cycles

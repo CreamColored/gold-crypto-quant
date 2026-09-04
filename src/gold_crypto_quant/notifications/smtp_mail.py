@@ -257,7 +257,7 @@ def _build_market_chart_png(
             parameters_for_same_timeframe,
         )
 
-        # 双行情对照时必须读取事件所属交易所的数据，不能继续默认使用Gate测试网。
+        # 双所对照时必须读取事件所属交易所的数据，不能继续默认使用Gate测试网。
         bars = load_market_bars(symbol, interval, limit=80, venue=venue)
         context = build_rotation_box_context(bars, parameters_for_same_timeframe(interval))
         display = bars.join(context[["bb_upper", "bb_middle", "bb_lower"]]).tail(48).dropna()

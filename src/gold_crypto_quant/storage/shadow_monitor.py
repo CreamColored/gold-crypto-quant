@@ -62,7 +62,7 @@ def _ensure_account(session: Session, venue: str) -> TradingAccount:
 
 
 def ensure_system_shadow_accounts(engine: Engine | None = None) -> None:
-    """在Web或双行情服务启动时保证两套系统账户存在。"""
+    """在Web或量化服务启动时保证两套系统账户存在。"""
     engine = engine or build_engine()
     with Session(engine) as session:
         for venue in ACCOUNT_DEFINITIONS:

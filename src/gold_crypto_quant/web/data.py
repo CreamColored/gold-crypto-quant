@@ -32,7 +32,7 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-# 盘口面板固定展示这三个品种，与采集器和双行情服务保持一致。
+# 盘口面板固定展示这三个品种，与采集器和量化服务保持一致。
 QUOTE_SYMBOLS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
 
 VENUE_INFO = {
