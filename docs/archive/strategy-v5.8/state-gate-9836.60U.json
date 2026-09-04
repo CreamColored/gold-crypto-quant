@@ -1,0 +1,182 @@
+{
+  "strategy_version": "5.8.0",
+  "equity": 9836.595089909986,
+  "peak_equity": 10017.63219941361,
+  "day_start_equity": 9836.595089909986,
+  "current_day": "2026-09-05",
+  "last_bar_times": {
+    "BTC_USDT": {
+      "5m": "2026-09-04T18:15:00+00:00",
+      "15m": "2026-09-04T18:00:00+00:00",
+      "30m": "2026-09-04T17:30:00+00:00",
+      "1h": "2026-09-04T17:00:00+00:00"
+    },
+    "ETH_USDT": {
+      "5m": "2026-09-04T18:15:00+00:00",
+      "15m": "2026-09-04T18:00:00+00:00",
+      "30m": "2026-09-04T17:30:00+00:00",
+      "1h": "2026-09-04T17:00:00+00:00"
+    },
+    "XAU_USDT": {
+      "5m": "2026-09-04T15:25:00+00:00",
+      "15m": "2026-09-04T15:15:00+00:00",
+      "30m": "2026-09-04T15:00:00+00:00",
+      "1h": "2026-09-04T14:00:00+00:00"
+    }
+  },
+  "last_micro_bar_times": {
+    "BTC_USDT": "2026-09-04T18:20:00+00:00",
+    "ETH_USDT": "2026-09-04T18:20:00+00:00",
+    "XAU_USDT": "2026-09-04T15:29:00+00:00"
+  },
+  "provisional_touch_since": {},
+  "opened_in_bar": {
+    "BTC_USDT": "2026-09-04T12:30:00+00:00",
+    "ETH_USDT": "2026-09-04T12:30:00+00:00"
+  },
+  "box_active": {
+    "BTC_USDT": {
+      "5m": true,
+      "15m": true,
+      "30m": false,
+      "1h": false
+    },
+    "ETH_USDT": {
+      "5m": false,
+      "15m": false,
+      "30m": false,
+      "1h": false
+    },
+    "XAU_USDT": {
+      "5m": false,
+      "15m": false,
+      "30m": false,
+      "1h": false
+    }
+  },
+  "blocked_after_stop": {
+    "BTC_USDT": {
+      "5m": false,
+      "15m": false,
+      "30m": false,
+      "1h": false
+    },
+    "ETH_USDT": {
+      "5m": true,
+      "15m": true,
+      "30m": true,
+      "1h": true
+    },
+    "XAU_USDT": {
+      "5m": false,
+      "15m": false,
+      "30m": false,
+      "1h": false
+    }
+  },
+  "reset_streak": {
+    "BTC_USDT": {
+      "5m": 0,
+      "15m": 0,
+      "30m": 0,
+      "1h": 0
+    },
+    "ETH_USDT": {
+      "5m": 0,
+      "15m": 0,
+      "30m": 0,
+      "1h": 0
+    },
+    "XAU_USDT": {
+      "5m": 0,
+      "15m": 0,
+      "30m": 0,
+      "1h": 0
+    }
+  },
+  "positions": {
+    "BTC_USDT": {
+      "position_side": "",
+      "active_interval": "",
+      "entry_time": "2026-09-04T12:30:00+00:00",
+      "quantity": 0.06636751549243697,
+      "remaining_quantity": 0.0,
+      "entry_price": 80680.76607656534,
+      "stop_price": 80380.76607656534,
+      "entry_fee_remaining": 0.0,
+      "trade_net_pnl": -24.714907795579137,
+      "middle_reduced": false,
+      "middle_reference_price": 81035.87500000001,
+      "middle_trigger_price": 81035.87500000001,
+      "structure_confirmed": false,
+      "trend_ride_active": false,
+      "trend_ride_next_trigger_price": 0.0,
+      "trend_ride_step_points": 0.0,
+      "entry_opposite_band": 81390.98392343469,
+      "trend_ride_last_reduce_price": 0.0,
+      "trend_ride_steps_done": 0,
+      "middle_advance_distance": 0.0
+    },
+    "ETH_USDT": {
+      "position_side": "",
+      "active_interval": "",
+      "entry_time": "2026-09-04T12:30:00+00:00",
+      "quantity": 1.7303037882847747,
+      "remaining_quantity": 0.0,
+      "entry_price": 2507.22920281054,
+      "stop_price": 2495.22920281054,
+      "entry_fee_remaining": 0.0,
+      "trade_net_pnl": -24.65312052609019,
+      "middle_reduced": false,
+      "middle_reference_price": 2520.8015,
+      "middle_trigger_price": 2518.8015,
+      "structure_confirmed": false,
+      "trend_ride_active": false,
+      "trend_ride_next_trigger_price": 0.0,
+      "trend_ride_step_points": 0.0,
+      "entry_opposite_band": 2534.37379718946,
+      "trend_ride_last_reduce_price": 0.0,
+      "trend_ride_steps_done": 0,
+      "middle_advance_distance": 2.0
+    },
+    "XAU_USDT": {
+      "position_side": "",
+      "active_interval": "",
+      "entry_time": "2026-09-04T01:26:00+00:00",
+      "quantity": 1.341415822602144,
+      "remaining_quantity": 0.0,
+      "entry_price": 4476.983840624772,
+      "stop_price": 4476.983840624772,
+      "entry_fee_remaining": 0.0,
+      "trade_net_pnl": 0.2553973557305258,
+      "middle_reduced": true,
+      "middle_reference_price": 4483.1855,
+      "middle_trigger_price": 4483.1855,
+      "structure_confirmed": true,
+      "trend_ride_active": false,
+      "trend_ride_next_trigger_price": 0.0,
+      "trend_ride_step_points": 0.0,
+      "entry_opposite_band": 4489.387159375227,
+      "trend_ride_last_reduce_price": 0.0,
+      "trend_ride_steps_done": 0,
+      "middle_advance_distance": 0.0
+    }
+  },
+  "symbol_blocked_after_stop": {
+    "BTC_USDT": false,
+    "ETH_USDT": true,
+    "XAU_USDT": false
+  },
+  "symbol_stopped_interval": {
+    "BTC_USDT": "",
+    "ETH_USDT": "15m",
+    "XAU_USDT": ""
+  },
+  "symbol_resume_check_after": {
+    "BTC_USDT": "",
+    "ETH_USDT": "2026-09-04T13:00:00+00:00",
+    "XAU_USDT": ""
+  },
+  "daily_blocked": false,
+  "permanent_fuse": false
+}
