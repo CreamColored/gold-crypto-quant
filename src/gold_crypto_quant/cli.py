@@ -190,6 +190,14 @@ def main() -> None:
     parser.add_argument("--retry-max-seconds", type=float, default=300.0, help="最大重试等待秒数")
     parser.add_argument("--max-cycles", type=int, help="成功运行指定轮数后退出，仅用于验证")
     parser.add_argument(
+        "--log-every-cycle",
+        action="store_true",
+        help=(
+            "每一轮都写日志。1秒轮询下一天86400行，其中绝大多数是"
+            "什么都没发生；只在盯盘或排查时开。"
+        ),
+    )
+    parser.add_argument(
         "--lock-file",
         type=Path,
         default=Path(".runtime/market-data-runner.lock"),
@@ -1138,6 +1146,7 @@ def main() -> None:
             max_cycles=args.max_cycles or 10_080,
             stop_event=comparison_stop,
             reporter=_runtime_log,
+            log_every_cycle=args.log_every_cycle,
         )
         _runtime_log("Gate/币安实盘公共行情七天对照启动；真实交易始终关闭")
         with (

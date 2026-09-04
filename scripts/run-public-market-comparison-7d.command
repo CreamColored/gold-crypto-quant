@@ -17,4 +17,5 @@ export PYTHONUNBUFFERED="1"
 exec .venv/bin/python main.py public-market-comparison \
   --limit 500 \
   --poll-seconds 1 \
+  --log-every-cycle \
   --max-cycles 604800 2>&1 | tee -a logs/public-market-comparison.log

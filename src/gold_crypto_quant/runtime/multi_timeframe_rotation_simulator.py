@@ -131,6 +131,9 @@ class MultiTimeframePaperSummary:
     reason: str
     # 供通知直接展示的当前持仓摘要；无持仓时为"全部空仓"。
     holdings: str = ""
+    # 本轮在途K线的观察情况：哪些品种正在轨道外计时、已经多久。
+    # 每秒轮询下这是唯一能看出"那59轮在干什么"的信息，否则日志里只有权益没变。
+    provisional_watch: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +839,7 @@ def run_multi_timeframe_paper_cycle(
             selected_symbol="",
             selected_interval="",
             reason="V5共享影子账户已从各品种各周期最新收盘K线开始",
+            provisional_watch="",
             # 首次建账必然无持仓；不写死会让通知里出现空白的"持仓："一行。
             holdings="全部空仓",
         )
@@ -1653,6 +1657,15 @@ def run_multi_timeframe_paper_cycle(
         )
 
     held = [holding_text(symbol) for symbol, _side, _interval in active]
+    # 正在轨道外计时的品种。每秒轮询下这是唯一能看出"那59轮在干什么"的信息——
+    # 没有它，日志里只剩"权益没变、信号0条"，看不出停留确认到底有没有在工作。
+    watching = []
+    for symbol, raw in sorted(state.provisional_touch_since.items()):
+        try:
+            held_for = (wall_clock - datetime.fromisoformat(raw)).total_seconds()
+        except (ValueError, NameError):
+            continue
+        watching.append(f"{symbol}已在轨道外{held_for:.0f}秒")
     return MultiTimeframePaperSummary(
         status="FUSED" if state.permanent_fuse else "RUNNING",
         processed_bars=processed_bars,
@@ -1663,6 +1676,7 @@ def run_multi_timeframe_paper_cycle(
         active_interval=",".join(item[2] for item in active),
         selected_symbol=selected[0],
         selected_interval=selected[1],
-        reason="V5.7按1分钟触轨即时执行，不等待主周期收线；Gate订单提交接口未调用",
+        reason="V5.8按秒级在途K线触轨执行，不等待主周期收线；Gate订单提交接口未调用",
         holdings="；".join(held) if held else "全部空仓",
+        provisional_watch="、".join(watching),
     )

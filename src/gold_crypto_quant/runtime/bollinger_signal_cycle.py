@@ -31,6 +31,8 @@ class BollingerSignalCycleSummary:
     paper_events: tuple[RotationPaperEvent, ...] = ()
     # 当前在场仓位摘要，直接进通知；无持仓时为"全部空仓"。
     paper_holdings: str = ""
+    # 在途K线的观察情况，供每分钟心跳日志展示。
+    paper_provisional_watch: str = ""
 
 
 # 各交易所上一轮的行情健康判定；没有新收线K线时复用。
@@ -139,4 +141,5 @@ def run_bollinger_signal_cycle(
         paper_equity=paper.equity,
         paper_events=paper.events,
         paper_holdings=paper.holdings,
+        paper_provisional_watch=paper.provisional_watch,
     )

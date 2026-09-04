@@ -1,5 +1,6 @@
 """Gate与币安实盘公共行情双影子账户七天对照服务。"""
 
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -128,6 +129,7 @@ class PublicMarketComparisonRunner:
         max_cycles: int = 10_080,
         stop_event: Event | None = None,
         reporter: Callable[[str], None] | None = None,
+        log_every_cycle: bool = False,
     ) -> None:
         if poll_seconds <= 0 or not 30 <= limit <= 1500 or max_cycles < 1:
             raise ValueError("invalid public comparison runner settings")
@@ -149,6 +151,13 @@ class PublicMarketComparisonRunner:
         }
         # 已经就降级发过告警的交易所，避免每秒重复推送。
         self._degraded: set[str] = set()
+        # 每轮都写日志。一天86400行里绝大多数是"什么都没发生"，只在盯盘或排查时开。
+        self.log_every_cycle = log_every_cycle
+        # 两次留痕之间的统计：跑了多少轮、多少轮观察到价格在轨道外、最长连续几秒。
+        # 每秒轮询下没有这个就看不出那59轮在干什么。
+        self._quiet_cycles = 0
+        self._watch_cycles = 0
+        self._max_dwell_seconds = 0.0
 
     def _notify(self, key: str, title: str, lines: tuple[str, ...], severity: str) -> None:
         """发送带对照服务前缀的事件；邮件失败不改变影子账户。"""
@@ -465,15 +474,52 @@ class PublicMarketComparisonRunner:
                 f"{retry_note}"
             )
             signals = sum(item.summary.new_signal_count for item in feed_results)
+            self._quiet_cycles += 1
+            watches = [
+                item.summary.paper_provisional_watch
+                for item in feed_results
+                if item.summary.paper_provisional_watch
+            ]
+            if watches:
+                self._watch_cycles += 1
+                for chunk in "、".join(watches).split("、"):
+                    found = re.search(r"轨道外(\d+)秒", chunk)
+                    if found:
+                        self._max_dwell_seconds = max(
+                            self._max_dwell_seconds, float(found.group(1))
+                        )
             # 每秒一行日志会把有用的信息淹掉。只在有新收线K线、或本轮真的产生了
             # 交易信号时留痕；纯粹的在途复查轮次不写日志。
-            if feed_results and (bars_changed or signals):
+            if feed_results and (bars_changed or signals or self.log_every_cycle):
                 details = "；".join(
                     f"{item.label}[{item.source}]权益"
                     f"{item.summary.paper_equity:.2f}U、信号{item.summary.new_signal_count}条"
                     for item in feed_results
                 )
-                self.reporter(f"量化服务第{completed_cycles}轮完成：{details}；{timing}")
+                # 心跳：两次留痕之间跑了多少轮、有多少轮价格在轨道外、最长连续几秒。
+                # 停留确认要求连续3秒，"最长2秒"就说明它挡住了一次插针。
+                if self._quiet_cycles > 1:
+                    heartbeat = (
+                        f"；近{self._quiet_cycles}轮：在途观察{self._watch_cycles}轮触轨外"
+                        f"、最长连续{self._max_dwell_seconds:.0f}秒"
+                    )
+                else:
+                    heartbeat = ""
+                live = "；".join(
+                    item.summary.paper_provisional_watch
+                    for item in feed_results
+                    if item.summary.paper_provisional_watch
+                )
+                # 逐轮模式下每行长得一样，必须标出这一轮是不是有新收线K线——
+                # 60轮里只有1轮有，其余59轮是在途复查，两者做的事完全不同。
+                mark = "◆新K线" if bars_changed else "·在途复查"
+                self.reporter(
+                    f"量化服务第{completed_cycles}轮{mark}：{details}；{timing}{heartbeat}"
+                    + (f"；当前{live}" if live else "")
+                )
+                self._quiet_cycles = 0
+                self._watch_cycles = 0
+                self._max_dwell_seconds = 0.0
             elif not feed_results:
                 self.reporter(
                     f"量化服务第{completed_cycles}轮：两个行情源均失败；{timing}"
