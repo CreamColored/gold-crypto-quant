@@ -21,3 +21,4 @@ var/backups/
 var/replay/
 var/network/
 
+var/sweeps/
