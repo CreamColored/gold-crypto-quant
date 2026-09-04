@@ -17,6 +17,7 @@ import json
 import signal
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -25,10 +26,27 @@ from sqlalchemy import Engine, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
+from gold_crypto_quant.exchanges.binance import BinancePublicClient
+from gold_crypto_quant.exchanges.gate import GatePublicClient
 from gold_crypto_quant.market_data.binance_history import BINANCE_LIVE_VENUE, INTERNAL_TO_BINANCE
 from gold_crypto_quant.market_data.gate_history import GATE_LIVE_VENUE
+from gold_crypto_quant.market_data.live_feed import (
+    refresh_binance_live_bars,
+    refresh_gate_live_bars,
+)
+from gold_crypto_quant.runtime.provisional_bars import (
+    ProvisionalTracker,
+    rebuild_from_seconds,
+)
 from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument, MarketQuoteMinute, MarketQuoteSecond
+from gold_crypto_quant.storage.redis_bars import (
+    RedisBar,
+    bootstrap_from_mysql,
+    publish_bars,
+    publish_cursor,
+    publish_heartbeat,
+)
 from gold_crypto_quant.storage.redis_client import build_redis, quote_key
 
 QUOTE_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
@@ -37,6 +55,11 @@ GATE_WS_URL = "wss://fx-ws.gateio.ws/v4/ws/usdt"
 # 断线重连退避；上限不宜太大，盘口断开期间无法事后补齐。
 RECONNECT_BACKOFF = (1.0, 2.0, 5.0, 10.0, 20.0)
 SECOND_FLUSH_INTERVAL = 1.0
+# 每秒把在途K线推给 Redis；策略据此在分钟内也能看到价格变化。
+PROVISIONAL_PUBLISH_INTERVAL = 1.0
+# K线刷新循环的节拍。真正发请求由 live_refresh 的周期水位决定，这里只是检查频率。
+BAR_REFRESH_INTERVAL = 2.0
+PUBLIC_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 
 
 @dataclass(slots=True)
@@ -108,6 +131,12 @@ class QuoteCollector:
         # 分钟桶实际覆盖了多少秒；小于60即说明该分钟内断过线。
         self._minute_seconds: dict[tuple[str, str, datetime], int] = {}
         self._stopping = asyncio.Event()
+        # 在途K线：本分钟还没结束的那根，用盘口逐帧累加。
+        self._provisional = ProvisionalTracker()
+        # 各交易所的K线刷新水位；只有到期的周期才发REST请求。
+        self._refreshed: dict[str, dict[str, datetime]] = {
+            GATE_LIVE_VENUE: {}, BINANCE_LIVE_VENUE: {},
+        }
 
     def load_instruments(self) -> None:
         """解析 (交易所, 品种) 到 instrument_id；缺失的品种直接报错，不静默跳过。"""
@@ -166,6 +195,102 @@ class QuoteCollector:
             venue, contract, minute = key
             rows.append((venue, contract, minute, bucket, covered))
         return rows
+
+    def _track_provisional(
+        self, venue: str, contract: str, bid: float, ask: float, exchange_ms: object
+    ) -> None:
+        """把一帧盘口并进在途K线。
+
+        时间归属优先用交易所推送里的时间戳；字段缺失或不是数字时才退回本机时钟——
+        退回是为了不丢帧，但边界可能错位，因此只作为兜底。
+        """
+        try:
+            moment = datetime.fromtimestamp(float(exchange_ms) / 1000, tz=UTC)
+        except (TypeError, ValueError):
+            moment = datetime.now(UTC)
+        self._provisional.observe(venue, contract, (bid + ask) / 2, moment)
+
+    def _publish_provisional(self) -> int:
+        """把各品种的在途K线写进 Redis 的第501根位置。
+
+        只写1分钟一档：盘口没有成交量，而箱体判定的量比是在5m及以上算的，给高周期
+        合成在途K线会让量比失真；策略对高周期本来也只读已确认的收线K线。
+        """
+        snapshot = self._provisional.snapshot()
+        if not snapshot:
+            return 0
+        try:
+            client = build_redis()
+            for (venue, contract), bar in snapshot.items():
+                publish_bars(venue, contract, "1m", [bar], client=client)
+            for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+                publish_heartbeat(venue, client=client)
+        except Exception as error:  # noqa: BLE001 - Redis 故障不能拖垮采集
+            self.reporter(f"在途K线写入失败：{type(error).__name__}: {error}")
+            return 0
+        return len(snapshot)
+
+    def refresh_bars(self) -> int:
+        """拉取到期周期的官方K线，写 MySQL 与 Redis。
+
+        这一步原先在双行情进程里。搬过来之后策略进程不再持有交易所客户端，采集与
+        策略彻底分开：拉取失败只影响这个进程，策略靠 Redis 陈旧度降级读 MySQL 继续跑。
+        """
+        total = 0
+        for venue, refresh, client_attr in (
+            (GATE_LIVE_VENUE, refresh_gate_live_bars, "_gate_client"),
+            (BINANCE_LIVE_VENUE, refresh_binance_live_bars, "_binance_client"),
+        ):
+            client = getattr(self, client_attr, None)
+            if client is None:
+                continue
+            kwargs = {"venue": venue} if venue == GATE_LIVE_VENUE else {}
+            results = refresh(
+                client,
+                contracts=self.contracts,
+                intervals=PUBLIC_INTERVALS,
+                refreshed=self._refreshed[venue],
+                limit=500,
+                **kwargs,
+            )
+            if not results:
+                continue
+            total += self._publish_closed_bars(venue, {r.interval for r in results})
+        return total
+
+    def _publish_closed_bars(self, venue: str, intervals: set[str]) -> int:
+        """把刚落库的官方K线同步进 Redis，并推进 cursor。
+
+        官方K线按 open_time 精确替换同一位置上的在途K线——ZSET 成员是字符串，同一
+        score 塞两个不同 JSON 会并存而不是覆盖，因此必须先删再写（见 redis_bars）。
+        """
+        from gold_crypto_quant.storage.market_bars import load_market_bars
+
+        published = 0
+        cursor: dict[tuple[str, str], datetime] = {}
+        try:
+            client = build_redis()
+            for contract in self.contracts:
+                for interval in sorted(intervals):
+                    frame = load_market_bars(contract, interval, venue=venue, limit=200)
+                    bars = [
+                        RedisBar(
+                            open_time=index.to_pydatetime(),
+                            open=float(row.open), high=float(row.high),
+                            low=float(row.low), close=float(row.close),
+                            volume=float(row.volume), quote_volume=float(row.quote_volume),
+                        )
+                        for index, row in frame.iterrows()
+                    ]
+                    if not bars:
+                        continue
+                    publish_bars(venue, contract, interval, bars, client=client)
+                    cursor[(contract, interval)] = bars[-1].open_time
+                    published += len(bars)
+            publish_cursor(venue, cursor, client=client)
+        except Exception as error:  # noqa: BLE001 - Redis 故障不能拖垮采集
+            self.reporter(f"K线同步Redis失败：{type(error).__name__}: {error}")
+        return published
 
     def _publish_snapshots(self, drained: list[tuple]) -> None:
         """把每个品种最新一秒的盘口写进 Redis，供策略与前端读当前价。
@@ -267,7 +392,12 @@ class QuoteCollector:
         data = payload.get("data") or payload
         symbol = data.get("s")
         if symbol in reverse and "b" in data:
-            self.record(BINANCE_LIVE_VENUE, reverse[symbol], float(data["b"]), float(data["a"]))
+            bid, ask = float(data["b"]), float(data["a"])
+            contract = reverse[symbol]
+            self.record(BINANCE_LIVE_VENUE, contract, bid, ask)
+            # E 是币安的事件时间（毫秒）。本机时钟和交易所有偏差，跨代理更明显，
+            # 用本机时钟归属分钟会让K线边界错位。
+            self._track_provisional(BINANCE_LIVE_VENUE, contract, bid, ask, data.get("E"))
 
     async def _gate_stream(self) -> None:
         subscribe = [
@@ -285,7 +415,10 @@ class QuoteCollector:
         result = payload.get("result") or {}
         contract = result.get("s")
         if contract in self.contracts and "b" in result:
-            self.record(GATE_LIVE_VENUE, contract, float(result["b"]), float(result["a"]))
+            bid, ask = float(result["b"]), float(result["a"])
+            self.record(GATE_LIVE_VENUE, contract, bid, ask)
+            # t 是 Gate 的推送时间（毫秒）；理由同币安。
+            self._track_provisional(GATE_LIVE_VENUE, contract, bid, ask, result.get("t"))
 
     async def _stream_loop(
         self, label: str, url: str, subscribe: list[dict] | None, handle
@@ -328,6 +461,50 @@ class QuoteCollector:
             except Exception as error:  # noqa: BLE001 - 落盘失败不能中断采集
                 self.reporter(f"盘口落盘失败：{type(error).__name__}: {error}")
 
+    def _bootstrap(self) -> None:
+        """启动时用 MySQL 灌满 Redis，并把当前这一分钟已经过去的部分补回来。
+
+        不走 REST：同样的数据 MySQL 里都有，本机读15个序列约440毫秒，而30个REST
+        请求即使并发也要2秒，还白占限流额度。
+
+        在途K线也要补：10:35:40 重启时，10:35 这根的前40秒没收到，open 和最高最低
+        都是错的。秒级表里有那40秒。
+        """
+        for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+            try:
+                cursor = bootstrap_from_mysql(
+                    venue, self.contracts, PUBLIC_INTERVALS, reporter=self.reporter
+                )
+                self.reporter(f"{venue} 灌载 {len(cursor)} 个K线序列进 Redis")
+            except Exception as error:  # noqa: BLE001 - 灌载失败仍可继续采集盘口
+                self.reporter(f"{venue} 灌载失败：{type(error).__name__}: {error}")
+            for contract in self.contracts:
+                try:
+                    partial = rebuild_from_seconds(venue, contract, engine=self.engine)
+                except Exception as error:  # noqa: BLE001
+                    self.reporter(f"{venue} {contract} 在途K线补齐失败：{error}")
+                    continue
+                if partial is not None:
+                    self._provisional.seed(venue, contract, partial)
+
+    async def _provisional_loop(self) -> None:
+        """每秒把在途K线推给 Redis。"""
+        while not self._stopping.is_set():
+            await asyncio.sleep(PROVISIONAL_PUBLISH_INTERVAL)
+            try:
+                await asyncio.to_thread(self._publish_provisional)
+            except Exception as error:  # noqa: BLE001 - 不能中断采集
+                self.reporter(f"在途K线循环异常：{type(error).__name__}: {error}")
+
+    async def _bar_refresh_loop(self) -> None:
+        """定期检查有没有周期收线；真正发请求由周期水位决定。"""
+        while not self._stopping.is_set():
+            await asyncio.sleep(BAR_REFRESH_INTERVAL)
+            try:
+                await asyncio.to_thread(self.refresh_bars)
+            except Exception as error:  # noqa: BLE001 - 拉取失败不能中断盘口采集
+                self.reporter(f"K线刷新失败：{type(error).__name__}: {error}")
+
     def request_stop(self) -> None:
         """请求停止；由信号处理器调用，实际收尾在 run() 的 finally 里完成。"""
         self.reporter("收到停止信号，正在冲刷内存中的桶")
@@ -349,10 +526,16 @@ class QuoteCollector:
                 pass
         self.load_instruments()
         self.reporter(f"盘口采集启动：{'、'.join(self.contracts)}，Gate与币安各一条连接")
+        stack = ExitStack()
+        self._gate_client = stack.enter_context(GatePublicClient())
+        self._binance_client = stack.enter_context(BinancePublicClient())
+        self._bootstrap()
         tasks = [
             asyncio.create_task(self._binance_stream()),
             asyncio.create_task(self._gate_stream()),
             asyncio.create_task(self._flush_loop()),
+            asyncio.create_task(self._provisional_loop()),
+            asyncio.create_task(self._bar_refresh_loop()),
         ]
         try:
             if seconds is None:
@@ -373,4 +556,5 @@ class QuoteCollector:
                 self.reporter("连接关闭超时，直接落盘")
             # 收尾时把内存里剩下的桶全部落盘，用未来时间强制冲刷。
             self.flush(datetime.now(UTC) + timedelta(minutes=2))
+            stack.close()
             self.reporter("盘口采集已停止")
