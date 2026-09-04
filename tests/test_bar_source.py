@@ -95,3 +95,51 @@ def test_provisional_column_is_stripped(monkeypatch) -> None:
     monkeypatch.setattr(bar_source, "read_bars", lambda *a, **k: _frame(500))
     frame = load_bars("S", "1m", venue="V", limit=500, health=SourceHealth("redis", ""))
     assert "provisional" not in frame.columns
+
+
+def test_bars_are_cached_until_the_cursor_moves(monkeypatch) -> None:
+    """收线K线一分钟才变一次，而策略每秒都跑；水位没动就不该重读。"""
+    bar_source.reset_bars_cache()
+    reads = []
+
+    def _read(*a, **k):  # noqa: ARG001
+        reads.append(1)
+        return _frame(300)
+
+    monkeypatch.setattr(bar_source, "read_bars", _read)
+    health = SourceHealth("redis", "", 1.0, {"S:1m": "2026-09-04T06:30:00+00:00"})
+    for _ in range(5):
+        load_bars("S", "1m", venue="V", limit=300, health=health)
+    assert len(reads) == 1
+
+
+def test_new_cursor_forces_a_reread(monkeypatch) -> None:
+    """新K线收线后必须重读，否则策略会拿着上一分钟的数据。"""
+    bar_source.reset_bars_cache()
+    reads = []
+
+    def _read(*a, **k):  # noqa: ARG001
+        reads.append(1)
+        return _frame(300)
+
+    monkeypatch.setattr(bar_source, "read_bars", _read)
+    for stamp in ("2026-09-04T06:30:00+00:00", "2026-09-04T06:31:00+00:00"):
+        load_bars("S", "1m", venue="V", limit=300,
+                  health=SourceHealth("redis", "", 1.0, {"S:1m": stamp}))
+    assert len(reads) == 2
+
+
+def test_missing_cursor_token_never_caches(monkeypatch) -> None:
+    """没有水位就无法判断数据是否变过，宁可每次重读也不能拿旧数据冒充新的。"""
+    bar_source.reset_bars_cache()
+    reads = []
+
+    def _read(*a, **k):  # noqa: ARG001
+        reads.append(1)
+        return _frame(300)
+
+    monkeypatch.setattr(bar_source, "read_bars", _read)
+    health = SourceHealth("redis", "", 1.0, {})
+    for _ in range(3):
+        load_bars("S", "1m", venue="V", limit=300, health=health)
+    assert len(reads) == 3

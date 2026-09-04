@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -33,10 +33,24 @@ class SourceHealth:
     source: str
     reason: str
     heartbeat_age: float | None = None
+    # 各(品种,周期)的最新收线时间。收线K线一分钟才变一次，而策略每秒都要跑；
+    # 拿它当缓存键就能省掉每秒重读5700根的开销。
+    cursor: dict[str, str] = field(default_factory=dict)
 
     @property
     def degraded(self) -> bool:
         return self.source != "redis"
+
+
+# 已加载的收线K线，键为 (交易所, 品种, 周期, 条数, 该序列的收线水位)。
+# 水位没变就说明这段K线一根都没动，直接复用；变了自然落到新键上。
+_BARS_CACHE: dict[tuple, pd.DataFrame] = {}
+_BARS_CACHE_LIMIT = 128
+
+
+def reset_bars_cache() -> None:
+    """清空K线缓存；测试与切换数据源时调用。"""
+    _BARS_CACHE.clear()
 
 
 def check_health(
@@ -57,7 +71,9 @@ def check_health(
         return SourceHealth("mysql", f"心跳时间戳无法解析：{raw!r}")
     if age > stale_after:
         return SourceHealth("mysql", f"采集心跳已停{age:.0f}秒", age)
-    return SourceHealth("redis", "", age)
+    return SourceHealth(
+        "redis", "", age, {k: v for k, v in cursor.items() if k != HEARTBEAT_FIELD}
+    )
 
 
 def load_bars(
@@ -75,12 +91,23 @@ def load_bars(
     而布林带和MACD需要足够的预热长度，短序列算出来的轨道是错的。
     """
     if health.source == "redis":
+        token = health.cursor.get(f"{symbol}:{interval}")
+        key = (venue, symbol, interval, limit, include_provisional, token)
+        if token:
+            cached = _BARS_CACHE.get(key)
+            if cached is not None:
+                return cached
         try:
             frame = read_bars(
                 venue, symbol, interval, limit=limit, include_provisional=include_provisional
             )
             if len(frame) >= min(limit, 200):
-                return frame.drop(columns=["provisional"], errors="ignore")
+                frame = frame.drop(columns=["provisional"], errors="ignore")
+                if token:
+                    if len(_BARS_CACHE) >= _BARS_CACHE_LIMIT:
+                        _BARS_CACHE.clear()
+                    _BARS_CACHE[key] = frame
+                return frame
         except Exception:  # noqa: BLE001 - 单条读失败就走 MySQL，不影响其它序列
             pass
     return load_market_bars(symbol, interval, venue=venue, limit=limit)
