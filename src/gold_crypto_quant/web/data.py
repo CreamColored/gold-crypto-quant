@@ -263,39 +263,50 @@ def build_overview(engine: Engine, *, viewer: Any) -> dict[str, Any]:
 
 
 def build_switch_view(switches: dict[str, bool]) -> dict:
-    """把三级开关整理成页面可直接渲染的层级列表。
+    """把三级开关整理成"总开关 + 每个交易所一组"的结构。
 
-    每一行同时给出"自身开关"和"实际是否允许开仓"——上级关闭时下级即使自身开着
-    也一样禁止，这个区别必须显式表达，否则页面会让人误以为该品种仍在交易。
+    上层关闭时下层由页面收起，但**下层状态原样保留**——重新打开上层会回到之前
+    配置的状态。级联写入（关上层顺带把下层也改掉）看似直观，实际会把用户单独
+    禁用某个品种的决定静默抹掉，而且抹掉这件事在页面上完全看不出来。
     """
-    rows: list[dict] = []
     global_on = switches.get(GLOBAL_SCOPE, True)
-    rows.append({
-        "scope_key": GLOBAL_SCOPE, "level": 0, "label": "总开关",
-        "sub": "关闭后所有交易所、所有品种都不再开仓",
-        "enabled": global_on, "effective": global_on,
-    })
+    venues = []
     for venue, label in ((GATE_LIVE_VENUE, "Gate"), (BINANCE_LIVE_VENUE, "币安")):
         venue_on = switches.get(venue, True)
-        rows.append({
-            "scope_key": venue, "level": 1, "label": label,
-            "sub": "该交易所全部品种",
-            "enabled": venue_on, "effective": global_on and venue_on,
-        })
+        symbols = []
         for symbol in QUOTE_SYMBOLS:
             key = f"{venue}:{symbol}"
             own = switches.get(key, True)
-            rows.append({
-                "scope_key": key, "level": 2,
-                "label": f"{label} · {symbol.replace('_USDT', '')}",
+            symbols.append({
+                "scope_key": key,
+                "label": symbol.replace("_USDT", ""),
                 "sub": symbol,
-                "enabled": own, "effective": global_on and venue_on and own,
+                "enabled": own,
+                "effective": global_on and venue_on and own,
             })
+        venues.append({
+            "scope_key": venue,
+            "label": label,
+            "enabled": venue_on,
+            "effective": global_on and venue_on,
+            # 上层关闭时前端收起品种列表；数据仍然返回，展开即可看到原状态。
+            "collapsed": not (global_on and venue_on),
+            "symbols": symbols,
+        })
+    known = [GLOBAL_SCOPE]
+    for venue in venues:
+        known.append(venue["scope_key"])
+        known.extend(item["scope_key"] for item in venue["symbols"])
+    allowed = [
+        item for venue in venues for item in venue["symbols"] if item["effective"]
+    ]
+    total = sum(len(venue["symbols"]) for venue in venues)
     return {
-        "rows": rows,
-        "known_keys": [row["scope_key"] for row in rows],
-        "blocked": sum(1 for row in rows if row["level"] == 2 and not row["effective"]),
-        "total": sum(1 for row in rows if row["level"] == 2),
+        "global": {"scope_key": GLOBAL_SCOPE, "enabled": global_on, "effective": global_on},
+        "venues": venues,
+        "known_keys": known,
+        "allowed": len(allowed),
+        "total": total,
     }
 
 

@@ -249,30 +249,46 @@ function renderCollector(health){
   }).join("");
 }
 
-// 交易开关：每行同时显示"自身开关"和"实际是否允许开仓"。上级关闭时下级即使自身开着
-// 也一样禁止——不显式区分的话，页面会让人误以为该品种还在交易。
+// 交易开关：总开关独占一行，交易所各成一张卡片。
+// 上层关闭时下层收起而不改动状态——重新打开会回到之前配置的状态。级联写入看似直观，
+// 却会把"单独禁用某个品种"的决定静默抹掉，而且抹掉在页面上完全看不出来。
+function switchToggle(scope, enabled, label){
+  return `<label class="ios-switch" title="${esc(label)}">
+    <input type="checkbox" data-scope="${esc(scope)}" ${enabled ? "checked" : ""}
+           aria-label="${esc(label)} 开仓开关">
+    <span class="ios-track"><span class="ios-knob"></span></span></label>`;
+}
+
 function renderSwitches(view){
-  const list = $("#switch-list"), hint = $("#switch-hint");
-  if(!list) return;
-  if(hint) hint.textContent = view.blocked
-    ? `总开关 → 交易所 → 品种；当前 ${view.blocked}/${view.total} 个品种禁止开仓`
-    : `总开关 → 交易所 → 品种，任一级关闭即禁止开仓`;
-  list.innerHTML = view.rows.map(row => {
-    const blocked = !row.effective;
-    // 自身开着但被上级挡住，要说清楚是被谁挡的，否则看不懂为什么点了开还是禁止。
-    const state = row.effective ? "允许开仓"
-      : row.enabled ? "被上级关闭" : "禁止开仓";
-    return `<div class="switch-row level-${row.level} ${blocked ? "off" : ""}">
-      <span class="switch-label">${esc(row.label)}<small>${esc(row.sub)}</small></span>
-      <span class="switch-state ${blocked ? "blocked" : ""}">${state}</span>
-      <label class="ios-switch" title="${esc(row.label)}">
-        <input type="checkbox" data-scope="${esc(row.scope_key)}" ${row.enabled ? "checked" : ""}
-               aria-label="${esc(row.label)} 开仓开关">
-        <span class="ios-track"><span class="ios-knob"></span></span>
-      </label>
-    </div>`;
+  const hint = $("#switch-hint");
+  if(hint) hint.textContent = `总开关 → 交易所 → 品种，任一级关闭即禁止开仓 · 当前 ${view.allowed}/${view.total} 个品种允许开仓`;
+
+  const globalRow = $("#switch-global");
+  if(globalRow) globalRow.innerHTML =
+    `<span class="switch-label">总开关<small>关闭后所有交易所、所有品种都不再开仓</small></span>
+     <span class="switch-state ${view.global.enabled ? "" : "blocked"}">${view.global.enabled ? "允许开仓" : "全部停止"}</span>
+     ${switchToggle(view.global.scope_key, view.global.enabled, "总开关")}`;
+
+  const grid = $("#switch-venues");
+  if(grid) grid.innerHTML = view.venues.map(venue => {
+    const body = venue.collapsed
+      ? `<div class="venue-collapsed">${view.global.enabled ? "该交易所已关闭" : "总开关已关闭"}，品种开关已收起<br><small>下层状态保留，重新打开即恢复</small></div>`
+      : venue.symbols.map(item =>
+          `<div class="switch-row">
+             <span class="switch-label">${esc(item.label)}<small>${esc(item.sub)}</small></span>
+             <span class="switch-state ${item.effective ? "" : "blocked"}">${item.effective ? "允许开仓" : "禁止开仓"}</span>
+             ${switchToggle(item.scope_key, item.enabled, item.label)}
+           </div>`).join("");
+    return `<article class="venue-card">
+      <div class="venue-head">
+        <span class="switch-label">${esc(venue.label)}<small>该交易所全部品种</small></span>
+        ${switchToggle(venue.scope_key, venue.enabled, venue.label)}
+      </div>
+      <div class="venue-body">${body}</div>
+    </article>`;
   }).join("");
-  list.querySelectorAll("input[type=checkbox]").forEach(box => {
+
+  document.querySelectorAll("#switch-global input, #switch-venues input").forEach(box => {
     box.addEventListener("change", async () => {
       box.disabled = true;
       try {
@@ -287,7 +303,7 @@ function renderSwitches(view){
         renderSwitches(await response.json());
       } catch (error) {
         console.error(error);
-        // 写入失败必须把勾选状态回滚，否则页面显示的和实际生效的会不一致。
+        // 写入失败必须回滚勾选状态，否则页面显示的和实际生效的会不一致。
         box.checked = !box.checked;
         box.disabled = false;
         showFreshness(false, "⚠ 开关保存失败，请重试");
