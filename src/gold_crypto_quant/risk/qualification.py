@@ -1,11 +1,17 @@
 """策略进入模拟交易前的强制样本外准入规则。"""
 
+from __future__ import annotations
+
 import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from gold_crypto_quant.backtest.research import RollingResearchResult
+if TYPE_CHECKING:
+    # 只用作类型标注。放在运行时导入会把整条回测链（vectorbt、numba、llvmlite、
+    # scipy、plotly 共约330MB）拖进三个线上服务，而它们一行都不用。
+    from gold_crypto_quant.backtest.research import RollingResearchResult
 
 
 @dataclass(frozen=True, slots=True)

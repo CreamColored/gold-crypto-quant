@@ -22,11 +22,19 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "redis>=6.4,<7",
     "uvicorn[standard]>=0.35,<1",
-    "vectorbt>=1.1,<2",
 ]
+
+# vectorbt 只有 backtest/ 模块在用，而三个线上服务一行都不加载（cli.py 已改成惰性
+# 导入，risk/qualification.py 的类型标注改成 TYPE_CHECKING）。它会拖进 numba、
+# llvmlite、scipy、plotly 共约 330 MB——部署机器磁盘只有 8.4 G，没必要为跑服务
+# 装下整套回测依赖。
+#
+# 本机开发：pip install -e ".[dev,backtest]"
+# 服务器：  pip install -e .
 
 [project.optional-dependencies]
 dev = ["pytest>=8.4,<10", "ruff>=0.12,<1"]
+backtest = ["vectorbt>=1.1,<2"]
 
 [project.scripts]
 gold-crypto-quant = "gold_crypto_quant.cli:main"

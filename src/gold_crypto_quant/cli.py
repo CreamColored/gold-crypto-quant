@@ -8,21 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 
-from gold_crypto_quant.backtest import (
-    EmaBacktestConfig,
-    InsufficientResearchData,
-    diagnose_trades,
-    run_ema_backtest,
-    run_holdout_research,
-    run_joint_breakout_research,
-    run_rolling_research,
-)
-from gold_crypto_quant.backtest.bollinger_range import (
-    BollingerBacktestConfig,
-    build_bollinger_qualification_decision,
-    qualify_fixed_bollinger_strategy,
-    run_bollinger_backtest,
-)
 from gold_crypto_quant.config import Settings, get_settings
 from gold_crypto_quant.exchanges.gate import GateTestnetClient
 from gold_crypto_quant.exchanges.oanda import (
@@ -106,6 +91,19 @@ def _read_oanda_practice_account(
         # 调用只读摘要接口；返回后with负责关闭底层连接池。
         account = client.get_account_summary(account_id)
     return account, auto_selected
+
+
+# 回测模块拖着 vectorbt、numba、llvmlite、scipy、plotly 一共约 330 MB，而三个线上
+# 服务一行都不用。放在模块顶层会让部署机器为了跑服务被迫装下整套回测依赖——
+# 那台 2 核 2G、磁盘只有 8.4G 的服务器装不下，也没必要。
+#
+# 改成用到时才导入：服务启动更快，部署只需运行时依赖。
+def _backtest():
+    """按需加载回测模块；只有回测子命令会走到这里。"""
+    from gold_crypto_quant import backtest as module
+    from gold_crypto_quant.backtest import bollinger_range
+
+    return module, bollinger_range
 
 
 def main() -> None:
@@ -324,11 +322,13 @@ def main() -> None:
         all_bars_15m = load_market_bars("ETH_USDT", "15m")
         # 两个周期使用同一个近七天起点，保证最终结果可以直接横向比较。
         bars_15m = all_bars_15m.loc[all_bars_15m.index >= bars_5m.index[0]]
-        bollinger_config = BollingerBacktestConfig(initial_equity=args.initial_equity)
+        bollinger_config = _backtest()[1].BollingerBacktestConfig(
+            initial_equity=args.initial_equity
+        )
         if args.command == "backtest-bollinger":
             for interval, bars in (("15m", bars_15m), ("5m", bars_5m)):
                 # 调用同周期因果回测：本周期确认震荡、触轨，并在本周期下一根开盘执行。
-                result = run_bollinger_backtest(
+                result = _backtest()[1].run_bollinger_backtest(
                     bars,
                     bars,
                     symbol="ETH_USDT",
@@ -350,7 +350,7 @@ def main() -> None:
             return
         # 调用固定参数三折准入；失败结果同样保存，确保不能靠删除失败记录绕过门禁。
         for interval, bars in (("15m", bars_15m), ("5m", bars_5m)):
-            qualification = qualify_fixed_bollinger_strategy(
+            qualification = _backtest()[1].qualify_fixed_bollinger_strategy(
                 bars,
                 bars,
                 symbol="ETH_USDT",
@@ -359,7 +359,7 @@ def main() -> None:
                 interval=interval,
                 same_timeframe=True,
             )
-            decision = build_bollinger_qualification_decision(qualification)
+            decision = _backtest()[1].build_bollinger_qualification_decision(qualification)
             record_id = save_qualification(decision)
             for fold_number, fold in enumerate(qualification.folds, start=1):
                 print(
@@ -381,13 +381,13 @@ def main() -> None:
         return
     if args.command == "backtest-ema":
         # 创建统一回测参数；125倍是名义仓位硬上限，实际仓位仍由单笔风险决定。
-        backtest_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        backtest_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 从MySQL只读取已经收盘且按时间升序排列的K线。
                 bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 运行EMA 20/50/200多空回测；该调用只在内存中计算，不连接交易接口。
-                result, _portfolio = run_ema_backtest(
+                result, _portfolio = _backtest()[0].run_ema_backtest(
                     bars,
                     symbol=contract,
                     interval=interval,
@@ -406,20 +406,20 @@ def main() -> None:
         return
     if args.command == "diagnose-ema":
         # 诊断使用与正式回测完全相同的初始权益、成本、止损和熔断参数。
-        diagnostic_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        diagnostic_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 从MySQL调用标准行情读取方法，读取前会检查连续性和OHLC合法性。
                 bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 先调用正式回测，确保诊断分析的是风控生效后的真实交易序列。
-                _result, portfolio = run_ema_backtest(
+                _result, portfolio = _backtest()[0].run_ema_backtest(
                     bars,
                     symbol=contract,
                     interval=interval,
                     config=diagnostic_config,
                 )
                 # 调用逐笔诊断方法，拆分交易方向、成本、退出类型和进场市场状态。
-                diagnostic = diagnose_trades(
+                diagnostic = _backtest()[0].diagnose_trades(
                     bars,
                     portfolio,
                     symbol=contract,
@@ -449,13 +449,13 @@ def main() -> None:
         return
     if args.command == "research-ema":
         # 参数研究同样使用正式成本和风控配置，不允许使用无手续费的乐观假设。
-        research_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        research_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，研究前先执行连续性和OHLC质量检查。
                 bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 调用时间隔离研究：前70%选择参数，后30%仅做一次样本外验证。
-                research = run_holdout_research(
+                research = _backtest()[0].run_holdout_research(
                     bars,
                     symbol=contract,
                     interval=interval,
@@ -483,20 +483,20 @@ def main() -> None:
         return
     if args.command == "walkforward-ema":
         # 滚动验证继续沿用正式成本、止损和动态熔断，避免研究环境与运行环境不一致。
-        walkforward_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        walkforward_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，所有滚动窗口共享同一份已验证历史数据。
                 bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 # 调用三折扩展窗口研究，每折验证数据都不会参与该折参数选择。
                 try:
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
                         base_config=walkforward_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     # 样本不足属于研究结论而非程序故障；输出原因后继续分析其他品种周期。
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
@@ -524,7 +524,7 @@ def main() -> None:
         return
     if args.command == "walkforward-filters":
         # 新过滤器使用受控组合，EMA周期仍固定为20/50/200；多空方向保持完全对称。
-        filter_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        filter_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，保证滚动研究只使用连续且合法的已收盘K线。
@@ -532,7 +532,7 @@ def main() -> None:
                 try:
                     # 调用三折滚动研究，同时评估ADX、高周期确认、冷却期、方向和ATR。
                     # both、long、short必须同时保留，避免研究阶段先验偏向某一个交易方向。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -544,7 +544,7 @@ def main() -> None:
                         cooldown_options=(0, 5),
                         base_config=filter_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     # 保持最低8笔训练交易要求，样本不足时跳过而不是放宽标准。
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
@@ -572,7 +572,7 @@ def main() -> None:
         return
     if args.command == "walkforward-pullback":
         # 回踩研究固定其他新过滤器关闭，只比较入场结构、ATR止损和多空方向。
-        pullback_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        pullback_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，确保回踩触碰使用的是完整连续的最高价和最低价。
@@ -580,7 +580,7 @@ def main() -> None:
                 try:
                     # 调用滚动研究，交叉基线只保留一组，回踩分别研究2、3、5根观察窗口。
                     # 同时保留both、long、short，确保BTC做多候选不会被研究入口提前排除。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -595,7 +595,7 @@ def main() -> None:
                         ),
                         base_config=pullback_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
                 # 调用研究结果中的候选计数，避免参数网格改变后日志仍显示旧数量。
@@ -622,7 +622,7 @@ def main() -> None:
         return
     if args.command == "walkforward-regime":
         # 市场状态研究只增加EMA200斜率开关，并保持20/50/200周期与多空双向不变。
-        regime_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        regime_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用标准行情读取方法，所有判断仅基于按时间排序的已收盘K线。
@@ -630,7 +630,7 @@ def main() -> None:
                 try:
                     # 调用三折滚动研究；每折只在训练集比较斜率开关和三档ATR距离。
                     # 方向固定both，避免再次通过历史收益选择固定做多或固定做空。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -640,7 +640,7 @@ def main() -> None:
                         trend_slope_lookbacks=(0, 5, 10),
                         base_config=regime_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     # 样本不足时保留拒绝结论，不通过降低最低交易数来制造结果。
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
@@ -666,7 +666,7 @@ def main() -> None:
         return
     if args.command == "walkforward-ema12":
         # 旧系统EMA12规则仅进入历史研究，不写准入表，也不会被纸面交易循环读取。
-        ema12_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        ema12_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         ema12_strategy = EmaTrendParameters(
             fast_period=12,
             slow_period=144,
@@ -684,7 +684,7 @@ def main() -> None:
                 bars = load_market_bars(contract, interval, venue=_venue_for_symbol(contract))
                 try:
                     # 调用三折滚动研究；只比较ATR止损和1/2/3根回踩观察窗，多空始终同时开启。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -700,7 +700,7 @@ def main() -> None:
                         base_strategy=ema12_strategy,
                         base_config=ema12_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
                 candidate_count = rolling.folds[0].research.candidate_count
@@ -726,7 +726,7 @@ def main() -> None:
         return
     if args.command == "walkforward-breakout":
         # 突破研究只替换入场条件，继续复用EMA趋势方向、ATR仓位、成本和两级熔断。
-        breakout_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        breakout_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         breakout_strategy = EmaTrendParameters(
             entry_mode="breakout",
             pullback_lookback=20,
@@ -738,7 +738,7 @@ def main() -> None:
                 try:
                     # 调用三折滚动研究，仅比较10/20/40根突破窗口和三档ATR止损。
                     # 方向固定both，确保最终策略始终符合BTC和ETH多空都做的核心规则。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -753,7 +753,7 @@ def main() -> None:
                         base_strategy=breakout_strategy,
                         base_config=breakout_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     print(f"{contract} {interval}: 样本不足，{exc}")
                     continue
                 candidate_count = rolling.folds[0].research.candidate_count
@@ -785,7 +785,7 @@ def main() -> None:
     }:
         if len(args.contracts) < 2:
             raise ValueError("共同突破研究至少需要BTC和ETH两个品种")
-        joint_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        joint_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         research_exits = args.command == "walkforward-joint-exits"
         research_regime = args.command in {
             "walkforward-joint-regime",
@@ -801,7 +801,7 @@ def main() -> None:
                 )
             try:
                 # 调用共同选参研究；训练得分取所有品种中最差者，防止牺牲ETH换取BTC收益。
-                joint = run_joint_breakout_research(
+                joint = _backtest()[0].run_joint_breakout_research(
                     bars_by_symbol,
                     interval=interval,
                     lookbacks=(20, 40) if research_exits or research_regime else (10, 20, 40),
@@ -818,7 +818,7 @@ def main() -> None:
                     ),
                     base_config=joint_config,
                 )
-            except InsufficientResearchData as exc:
+            except _backtest()[0].InsufficientResearchData as exc:
                 print(f"{interval}: 共同样本不足，{exc}")
                 continue
             print(
@@ -866,7 +866,7 @@ def main() -> None:
     if args.command == "qualify-ema":
         # 调用幂等建表，确保首次运行时准入审计表已经存在且带有中文字段说明。
         create_schema()
-        qualification_config = EmaBacktestConfig(initial_equity=args.initial_equity)
+        qualification_config = _backtest()[0].EmaBacktestConfig(initial_equity=args.initial_equity)
         for contract in args.contracts:
             for interval in args.intervals:
                 # 调用经过质量检查的MySQL历史K线，禁止使用临时或未收盘行情审批策略。
@@ -874,13 +874,13 @@ def main() -> None:
                 bars = load_market_bars(contract, interval, venue=venue)
                 try:
                     # 调用三折滚动研究，准入只接受互不重叠的样本外结果。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
                         base_config=qualification_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     print(f"{contract} {interval}: REJECTED（样本不足：{exc}）")
                     continue
                 # 调用强制准入规则生成不可变决定，任何一项门槛失败都会拒绝。
@@ -913,7 +913,7 @@ def main() -> None:
             higher_timeframe_mode="standard",
             trend_slope_lookback=5,
         )
-        fixed_config = EmaBacktestConfig(
+        fixed_config = _backtest()[0].EmaBacktestConfig(
             initial_equity=args.initial_equity,
             atr_multiple=1.5,
         )
@@ -927,7 +927,7 @@ def main() -> None:
                 bars = load_market_bars(contract, interval, venue=venue)
                 try:
                     # 每折只提供一个固定候选；训练或验证结果都不能改变任何策略参数。
-                    rolling = run_rolling_research(
+                    rolling = _backtest()[0].run_rolling_research(
                         bars,
                         symbol=contract,
                         interval=interval,
@@ -942,7 +942,7 @@ def main() -> None:
                         base_strategy=fixed_strategy,
                         base_config=fixed_config,
                     )
-                except InsufficientResearchData as exc:
+                except _backtest()[0].InsufficientResearchData as exc:
                     print(f"{contract} {interval}: REJECTED（样本不足：{exc}）")
                     continue
                 # 调用统一硬门禁，收益、回撤、盈利窗口或交易数任一失败都会拒绝。
