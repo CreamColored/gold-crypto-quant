@@ -13,6 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from gold_crypto_quant.config import get_settings
 from gold_crypto_quant.storage.database import build_engine, create_schema
 from gold_crypto_quant.storage.shadow_monitor import ensure_system_shadow_accounts
+from gold_crypto_quant.storage.trading_switches import load_switches, set_switch
 from gold_crypto_quant.storage.web_admin import (
     authenticate_admin,
     change_admin_password,
@@ -25,6 +26,7 @@ from gold_crypto_quant.web.data import (
     build_live_quotes,
     build_market_chart,
     build_overview,
+    build_switch_view,
     build_system_status,
     build_trade_events,
 )
@@ -248,6 +250,38 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request, "system.html", page_context(request, user, "system")
         )
+
+    @app.get("/trading", response_class=HTMLResponse)
+    def trading_page(request: Request, user=Depends(current_admin)):
+        return templates.TemplateResponse(
+            request, "trading.html", page_context(request, user, "trading")
+        )
+
+    @app.get("/api/switches")
+    def switches_api(_user=Depends(current_admin)):
+        return build_switch_view(load_switches())
+
+    @app.post("/api/switches")
+    def update_switch_api(request: Request, payload: dict, user=Depends(current_admin)):
+        """改一个开关。这是监管后台唯一会改变策略行为的写入口。
+
+        它只能做减法——关闭阻止开仓，开启恢复原有逻辑，两者都不会促成任何交易。
+        每次改动写入管理审计，便于事后追溯是谁在什么时候关掉了哪一档。
+        """
+        scope_key = str(payload.get("scope_key", ""))
+        enabled = bool(payload.get("enabled"))
+        if scope_key not in build_switch_view(load_switches())["known_keys"]:
+            raise HTTPException(status_code=400, detail="unknown switch scope")
+        set_switch(scope_key, enabled, updated_by=user.username)
+        save_admin_audit(
+            user_id=user.id,
+            action="TRADING_SWITCH",
+            result="ENABLED" if enabled else "DISABLED",
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            details={"scope_key": scope_key},
+        )
+        return build_switch_view(load_switches())
 
     @app.get("/api/overview")
     def overview_api(request: Request, user=Depends(current_admin)):

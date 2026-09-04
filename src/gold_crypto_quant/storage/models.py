@@ -960,6 +960,42 @@ class AppUser(Base):
     )
 
 
+class TradingSwitch(Base):
+    """交易开关：关闭后该范围只允许平仓与减仓，禁止任何新开仓。
+
+    三级层次由 scope_key 表达，逐级取"与"：
+      GLOBAL                      总开关
+      GATE_LIVE_PUBLIC            交易所开关
+      GATE_LIVE_PUBLIC:BTC_USDT   品种开关
+
+    只做减法：任何一级关闭都会阻止开仓，但**永远不会促成任何交易**。
+    已有仓位的止损、中轨减仓、对侧轨止盈与阶梯延续照常执行——
+    关闭开关意味着"只出不进"，而不是冻结持仓。
+    """
+
+    __tablename__ = "trading_switches"
+    __table_args__ = (
+        UniqueConstraint("scope_key", name="uq_trading_switch_scope"),
+        {"comment": "交易开关，按 GLOBAL / 交易所 / 交易所:品种 三级控制是否允许开仓"},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="记录主键ID"
+    )
+    scope_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="开关范围：GLOBAL、交易所代码或 交易所:品种"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("1"), comment="是否允许开仓"
+    )
+    updated_by: Mapped[str | None] = mapped_column(
+        String(64), comment="最后修改人用户名"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(fsp=6), nullable=False, server_default=CREATED_AT, comment="最后修改时间UTC"
+    )
+
+
 class TradingAccount(Base):
     """统一描述系统实验账户和未来各用户的模拟或正式交易账户。"""
 

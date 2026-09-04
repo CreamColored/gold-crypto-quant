@@ -23,6 +23,7 @@
         <a href="/market" class="nav-item {% if active_page == 'market' %}active{% endif %}"><span>⌁</span>实时行情</a>
         <a href="/trades" class="nav-item {% if active_page == 'trades' %}active{% endif %}"><span>⇄</span>交易记录</a>
         <a href="/accounts" class="nav-item {% if active_page == 'accounts' %}active{% endif %}"><span>◎</span>账户权益</a>
+        <a href="/trading" class="nav-item {% if active_page == 'trading' %}active{% endif %}"><span>⏻</span>交易配置</a>
         <a href="/system" class="nav-item {% if active_page == 'system' %}active{% endif %}"><span>◇</span>系统状态</a>
       </nav>
       <div class="sidebar-safety">
@@ -50,6 +51,7 @@
   <nav class="mobile-nav" aria-label="移动端导航">
     <a href="/" class="{% if active_page == 'dashboard' %}active{% endif %}">总览</a>
     <a href="/market" class="{% if active_page == 'market' %}active{% endif %}">行情</a>
+    <a href="/trading" class="{% if active_page == 'trading' %}active{% endif %}">开关</a>
     <a href="/trades" class="{% if active_page == 'trades' %}active{% endif %}">交易</a>
     <a href="/accounts" class="{% if active_page == 'accounts' %}active{% endif %}">账户</a>
     <a href="/system" class="{% if active_page == 'system' %}active{% endif %}">系统</a>

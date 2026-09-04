@@ -34,6 +34,7 @@ def test_core_table_names_are_registered() -> None:
         "strategy_signals",
         "trades",
         "trading_accounts",
+        "trading_switches",
     }
 
 

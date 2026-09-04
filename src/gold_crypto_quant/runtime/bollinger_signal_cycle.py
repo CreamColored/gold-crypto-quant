@@ -10,6 +10,7 @@ from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
 )
 from gold_crypto_quant.storage.market_bars import load_market_bars
 from gold_crypto_quant.storage.market_health import refresh_market_health
+from gold_crypto_quant.storage.trading_switches import load_switches, resolve_entry_allowed
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +86,12 @@ def run_bollinger_signal_cycle(
     }
     # 调用多品种状态机；BTC/ETH与四个交易周期共享账户，1m/3m只负责过滤开仓。
     paper_kwargs = {"state_path": state_path} if state_path is not None else {}
+    # 交易开关只挡开仓：关闭后已有仓位的止损、减仓与止盈照常执行。
+    switches = load_switches()
     paper = run_multi_timeframe_paper_cycle(
         bars_by_symbol,
         micro_bars_by_symbol=micro_bars_by_symbol,
+        entry_allowed=lambda symbol: resolve_entry_allowed(switches, venue, symbol),
         **paper_kwargs,
     )
     entry_count = sum("模拟开仓" in item.title for item in paper.events)

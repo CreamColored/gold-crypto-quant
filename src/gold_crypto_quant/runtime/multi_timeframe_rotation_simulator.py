@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -614,6 +615,7 @@ def run_multi_timeframe_paper_cycle(
     stop_slippage_rate: float = 0.0002,
     risk_per_trade: float = 0.0025,
     minimum_reward_risk: float = 0.0,
+    entry_allowed: "Callable[[str], bool] | None" = None,
 ) -> MultiTimeframePaperSummary:
     """按周期、品种优先级逐批处理K线，全系统始终最多持有一笔仓位。"""
     # 保留旧的单品种测试调用形式；正式运行传入“品种→周期→K线”的两层结构。
@@ -1027,6 +1029,14 @@ def run_multi_timeframe_paper_cycle(
         active = structure_side(symbol, as_of)
         return bool(active) and active != side
 
+    def switch_allows_entry(symbol: str) -> bool:
+        """交易开关关闭时禁止开仓；已有仓位的止损、减仓与止盈照常执行。
+
+        语义是"只出不进"，不是冻结持仓——关掉开关不应该让一笔在场的单子失去
+        止损保护。因此这个判定只挂在两个开仓入口上，平仓路径完全不受影响。
+        """
+        return entry_allowed is None or entry_allowed(symbol)
+
     def entry_reward_is_acceptable(
         symbol: str,
         interval: str,
@@ -1225,6 +1235,7 @@ def run_multi_timeframe_paper_cycle(
                             new_side = "SHORT" if old_side == "LONG" else "LONG"
                             if (
                                 box_valid
+                                and switch_allows_entry(symbol)
                                 and not structure_blocks_entry(
                                     symbol, interval, new_side, minute_open_time
                                 )
@@ -1300,6 +1311,7 @@ def run_multi_timeframe_paper_cycle(
                     reference = upper if touched_upper else lower
                     if (
                         touched_upper != touched_lower
+                        and switch_allows_entry(symbol)
                         and not structure_blocks_entry(
                             symbol, interval, side, minute_open_time
                         )

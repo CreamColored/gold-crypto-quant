@@ -728,3 +728,22 @@ def test_ladder_step_scales_with_symbol_price() -> None:
     # 缩放后各品种步长占价格比例应当一致，都在0.32%附近。
     assert btc_step / 77400.0 == pytest.approx(eth_step / 2500.0, rel=1e-6)
     assert btc_step > 200.0
+
+
+def test_entry_allowed_blocks_new_positions_only(monkeypatch) -> None:
+    """交易开关关闭时不再开仓，但已有仓位的止损与止盈照常执行。
+
+    语义是"只出不进"，不是冻结持仓——关掉开关不应该让一笔在场的单子失去止损保护。
+    因此该判定只挂在两个开仓入口上，平仓路径完全不受影响。
+    """
+    import inspect
+
+    from gold_crypto_quant.runtime import multi_timeframe_rotation_simulator as module
+
+    source = inspect.getsource(module.run_multi_timeframe_paper_cycle)
+    # 只在开仓判断里出现，不能出现在止损、减仓或止盈路径上。
+    assert source.count("switch_allows_entry(symbol)") == 2
+    for path in ("stop_hit", "target_hit", "middle_hit", "ladder_hit"):
+        block_start = source.index(f"{path} = ")
+        block = source[block_start:block_start + 600]
+        assert "switch_allows_entry" not in block

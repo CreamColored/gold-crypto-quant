@@ -249,6 +249,53 @@ function renderCollector(health){
   }).join("");
 }
 
+// 交易开关：每行同时显示"自身开关"和"实际是否允许开仓"。上级关闭时下级即使自身开着
+// 也一样禁止——不显式区分的话，页面会让人误以为该品种还在交易。
+function renderSwitches(view){
+  const list = $("#switch-list"), hint = $("#switch-hint");
+  if(!list) return;
+  if(hint) hint.textContent = view.blocked
+    ? `总开关 → 交易所 → 品种；当前 ${view.blocked}/${view.total} 个品种禁止开仓`
+    : `总开关 → 交易所 → 品种，任一级关闭即禁止开仓`;
+  list.innerHTML = view.rows.map(row => {
+    const blocked = !row.effective;
+    // 自身开着但被上级挡住，要说清楚是被谁挡的，否则看不懂为什么点了开还是禁止。
+    const state = row.effective ? "允许开仓"
+      : row.enabled ? "被上级关闭" : "禁止开仓";
+    return `<div class="switch-row level-${row.level} ${blocked ? "off" : ""}">
+      <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">
+        <input type="checkbox" data-scope="${esc(row.scope_key)}" ${row.enabled ? "checked" : ""}
+               style="width:18px;height:18px;cursor:pointer;">
+        <span class="switch-label">${esc(row.label)}<small>${esc(row.sub)}</small></span>
+      </label>
+      <span class="switch-state ${blocked ? "blocked" : ""}">${state}</span>
+    </div>`;
+  }).join("");
+  list.querySelectorAll("input[type=checkbox]").forEach(box => {
+    box.addEventListener("change", async () => {
+      box.disabled = true;
+      try {
+        const response = await fetch("/api/switches", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", Accept: "application/json"},
+          credentials: "same-origin",
+          body: JSON.stringify({scope_key: box.dataset.scope, enabled: box.checked}),
+        });
+        if(response.status === 401){ window.location.href = "/login"; return; }
+        if(!response.ok) throw new Error(await response.text());
+        renderSwitches(await response.json());
+      } catch (error) {
+        console.error(error);
+        // 写入失败必须把勾选状态回滚，否则页面显示的和实际生效的会不一致。
+        box.checked = !box.checked;
+        box.disabled = false;
+        showFreshness(false, "⚠ 开关保存失败，请重试");
+      }
+    });
+  });
+}
+async function loadSwitches(){ renderSwitches(await getJSON("/api/switches")); }
+
 document.addEventListener("DOMContentLoaded",()=>{
   const page=document.body.dataset.page;
   // 手动触发也走同一套记账，点刷新失败时同样会在页面上报错而不是静默。
@@ -278,4 +325,5 @@ document.addEventListener("DOMContentLoaded",()=>{
     $("#trade-next").addEventListener("click",manual(()=>loadTrades(tradePage+1)));
   }
   if(page==="system"){startPolling(loadSystem,60000);}
+  if(page==="trading"){startPolling(loadSwitches,30000);}
 });

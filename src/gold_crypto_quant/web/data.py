@@ -26,6 +26,7 @@ from gold_crypto_quant.storage.models import (
     ShadowTradeEvent,
     TradingAccount,
 )
+from gold_crypto_quant.storage.trading_switches import GLOBAL_SCOPE
 from gold_crypto_quant.strategy.bollinger_range import (
     build_rotation_box_context,
     parameters_for_same_timeframe,
@@ -258,6 +259,43 @@ def build_overview(engine: Engine, *, viewer: Any) -> dict[str, Any]:
         "recent_events": recent_events,
         "live_trading": False,
         "order_submission": False,
+    }
+
+
+def build_switch_view(switches: dict[str, bool]) -> dict:
+    """把三级开关整理成页面可直接渲染的层级列表。
+
+    每一行同时给出"自身开关"和"实际是否允许开仓"——上级关闭时下级即使自身开着
+    也一样禁止，这个区别必须显式表达，否则页面会让人误以为该品种仍在交易。
+    """
+    rows: list[dict] = []
+    global_on = switches.get(GLOBAL_SCOPE, True)
+    rows.append({
+        "scope_key": GLOBAL_SCOPE, "level": 0, "label": "总开关",
+        "sub": "关闭后所有交易所、所有品种都不再开仓",
+        "enabled": global_on, "effective": global_on,
+    })
+    for venue, label in ((GATE_LIVE_VENUE, "Gate"), (BINANCE_LIVE_VENUE, "币安")):
+        venue_on = switches.get(venue, True)
+        rows.append({
+            "scope_key": venue, "level": 1, "label": label,
+            "sub": "该交易所全部品种",
+            "enabled": venue_on, "effective": global_on and venue_on,
+        })
+        for symbol in QUOTE_SYMBOLS:
+            key = f"{venue}:{symbol}"
+            own = switches.get(key, True)
+            rows.append({
+                "scope_key": key, "level": 2,
+                "label": f"{label} · {symbol.replace('_USDT', '')}",
+                "sub": symbol,
+                "enabled": own, "effective": global_on and venue_on and own,
+            })
+    return {
+        "rows": rows,
+        "known_keys": [row["scope_key"] for row in rows],
+        "blocked": sum(1 for row in rows if row["level"] == 2 and not row["effective"]),
+        "total": sum(1 for row in rows if row["level"] == 2),
     }
 
 

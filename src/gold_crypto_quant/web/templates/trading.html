@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}交易配置 · Moon监管中心{% endblock %}
+{% block content %}
+<section class="page-heading compact-heading">
+  <div><p class="eyebrow">TRADING</p><h1>交易配置</h1><p>三级开关控制是否允许<strong>开仓</strong>；关闭后只出不进。</p></div>
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><h2>开仓开关</h2><p id="switch-hint">总开关 → 交易所 → 品种，任一级关闭即禁止开仓</p></div></div>
+  <div id="switch-list" class="switch-list"><div class="empty-state">正在载入…</div></div>
+  <div class="safety-banner"><span>只出不进</span><p>关闭开关<strong>只阻止新开仓</strong>，不会促成任何交易。已有仓位的止损、中轨减仓、对侧轨止盈与阶梯延续<strong>照常执行</strong>——关掉开关不会让在场的单子失去止损保护。</p></div>
+  <div class="safety-banner"><span>只读之外</span><p>本页是监管后台唯一一处会改变策略行为的地方。它只能做减法：没有任何开关能促使系统开仓或下单，<code>LIVE_TRADING</code> 始终为 false。</p></div>
+</section>
+{% endblock %}
