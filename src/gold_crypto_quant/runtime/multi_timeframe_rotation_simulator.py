@@ -1384,11 +1384,21 @@ def run_multi_timeframe_paper_cycle(
                         )
                     )
                     if is_provisional:
-                        # 在途K线要求触轨条件连续成立满若干秒才开仓。BTC每分钟的最高点
-                        # 有两成只停留了一秒，这些插针的证据强度远不如站住的触碰；而
-                        # 收线K线不加这道闸——它代表整整一分钟，本身已是充分的观察。
+                        # 停留确认必须看**当前价**而不是累计极值。在途K线的high/low
+                        # 是一分钟内的累计最值，只增不减——拿它判定的话，一秒的插针
+                        # 把high顶上去之后条件就永远成立，闸门只会把开仓延后几秒，
+                        # 完全起不到过滤作用。用close（最新中间价）才能表达"价格现在
+                        # 还在轨道外"，弹回来立刻清零重新计时。
+                        close_now = float(minute_bar["close"])
+                        still_outside = (side == "SHORT" and close_now >= upper) or (
+                            side == "LONG" and close_now <= lower
+                        )
                         qualified = _provisional_dwell_ready(
-                            state, symbol, qualified, wall_clock, provisional_dwell_seconds
+                            state,
+                            symbol,
+                            qualified and still_outside,
+                            wall_clock,
+                            provisional_dwell_seconds,
                         )
                     if qualified:
                         open_position(

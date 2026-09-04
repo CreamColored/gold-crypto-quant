@@ -212,3 +212,34 @@ def test_entry_bar_close_does_not_stop_on_pre_entry_prices(tmp_path) -> None:
     )
     assert summary.position_side == "LONG", "开仓那一根的入场前极值不该把仓位止损掉"
     assert not [event for event in summary.events if "止损" in event.title]
+
+
+def test_spike_that_returns_inside_never_opens(tmp_path) -> None:
+    """一秒的插针把累计high顶出轨道后价格弹回——即使等满3秒也不能开仓。
+
+    在途K线的high/low是一分钟内的累计最值，只增不减。拿它判定停留的话，插针一旦
+    发生条件就永远成立，闸门只会把开仓延后几秒，完全起不到过滤作用。必须看当前价。
+    """
+    bars = _bars_by_interval()
+    state_path = tmp_path / "returned.json"
+    micro = _micro()
+    lower = _armed(state_path, bars, micro)
+    moment = pd.Timestamp("2026-01-01 12:01", tz="UTC")
+
+    # low 已经跌破下轨（插针留下的累计最低价），但 close 已经回到轨道之内。
+    spiked = pd.Series(
+        {"open": lower + 0.5, "high": lower + 1.0, "low": lower - 0.4,
+         "close": lower + 0.5, "volume": 0.0, "quote_volume": 0.0},
+        name=moment,
+    )
+    kwargs = {
+        "micro_bars_by_symbol": {"ETH_USDT": micro},
+        "provisional_by_symbol": {"ETH_USDT": spiked},
+        "provisional_dwell_seconds": 3.0,
+        "state_path": state_path,
+    }
+    run_multi_timeframe_paper_cycle(bars, now=NOW, **kwargs)
+    summary = run_multi_timeframe_paper_cycle(bars, now=NOW + timedelta(seconds=10), **kwargs)
+    assert summary.position_side == "", "价格已弹回轨道内，插针不该开仓"
+    stored = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "ETH_USDT" not in stored["provisional_touch_since"], "条件不成立时必须清零"
