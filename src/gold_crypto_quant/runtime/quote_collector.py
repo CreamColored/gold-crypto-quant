@@ -26,6 +26,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
+from gold_crypto_quant.config import get_settings
 from gold_crypto_quant.exchanges.binance import BinancePublicClient
 from gold_crypto_quant.exchanges.gate import GatePublicClient
 from gold_crypto_quant.market_data.binance_history import BINANCE_LIVE_VENUE, INTERNAL_TO_BINANCE
@@ -49,7 +50,11 @@ from gold_crypto_quant.storage.redis_bars import (
 )
 from gold_crypto_quant.storage.redis_client import build_redis, quote_key
 
-QUOTE_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+ALL_QUOTE_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+ALL_QUOTE_VENUES = (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE)
+# 实际启用的品种由 .env 的 ACTIVE_SYMBOLS 决定；停掉的品种连盘口订阅一起停。
+QUOTE_CONTRACTS = get_settings().enabled_symbols(ALL_QUOTE_CONTRACTS)
+QUOTE_VENUES = get_settings().enabled_venues(ALL_QUOTE_VENUES)
 BINANCE_WS_URL = "wss://fstream.binance.com/stream?streams="
 GATE_WS_URL = "wss://fx-ws.gateio.ws/v4/ws/usdt"
 # 断线重连退避；上限不宜太大，盘口断开期间无法事后补齐。
@@ -143,14 +148,12 @@ class QuoteCollector:
         # 在途K线：本分钟还没结束的那根，用盘口逐帧累加。
         self._provisional = ProvisionalTracker()
         # 各交易所的K线刷新水位；只有到期的周期才发REST请求。
-        self._refreshed: dict[str, dict[str, datetime]] = {
-            GATE_LIVE_VENUE: {}, BINANCE_LIVE_VENUE: {},
-        }
+        self._refreshed: dict[str, dict[str, datetime]] = {v: {} for v in QUOTE_VENUES}
 
     def load_instruments(self) -> None:
         """解析 (交易所, 品种) 到 instrument_id；缺失的品种直接报错，不静默跳过。"""
         with Session(self.engine) as session:
-            for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+            for venue in QUOTE_VENUES:
                 for contract in self.contracts:
                     found = session.execute(
                         select(Instrument.id).where(
@@ -232,7 +235,7 @@ class QuoteCollector:
             client = build_redis()
             for (venue, contract), bar in snapshot.items():
                 publish_bars(venue, contract, "1m", [bar], client=client)
-            for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+            for venue in QUOTE_VENUES:
                 publish_heartbeat(venue, client=client)
         except Exception as error:  # noqa: BLE001 - Redis 故障不能拖垮采集
             self.reporter(f"在途K线写入失败：{type(error).__name__}: {error}")
@@ -250,6 +253,8 @@ class QuoteCollector:
             (GATE_LIVE_VENUE, refresh_gate_live_bars, "_gate_client"),
             (BINANCE_LIVE_VENUE, refresh_binance_live_bars, "_binance_client"),
         ):
+            if venue not in QUOTE_VENUES:
+                continue
             client = getattr(self, client_attr, None)
             if client is None:
                 continue
@@ -481,7 +486,7 @@ class QuoteCollector:
         在途K线也要补：10:35:40 重启时，10:35 这根的前40秒没收到，open 和最高最低
         都是错的。秒级表里有那40秒。
         """
-        for venue in (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE):
+        for venue in QUOTE_VENUES:
             try:
                 cursor = bootstrap_from_mysql(
                     venue, self.contracts, PUBLIC_INTERVALS, reporter=self.reporter
@@ -554,12 +559,15 @@ class QuoteCollector:
         self._binance_client = stack.enter_context(BinancePublicClient())
         self._bootstrap()
         tasks = [
-            asyncio.create_task(self._binance_stream()),
-            asyncio.create_task(self._gate_stream()),
             asyncio.create_task(self._flush_loop()),
             asyncio.create_task(self._provisional_loop()),
             asyncio.create_task(self._bar_refresh_loop()),
         ]
+        # 只订阅启用的交易所；停掉的那路完全不建立 WebSocket 连接。
+        if GATE_LIVE_VENUE in QUOTE_VENUES:
+            tasks.append(asyncio.create_task(self._gate_stream()))
+        if BINANCE_LIVE_VENUE in QUOTE_VENUES:
+            tasks.append(asyncio.create_task(self._binance_stream()))
         try:
             if seconds is None:
                 await self._stopping.wait()

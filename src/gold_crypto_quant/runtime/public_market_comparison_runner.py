@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 
-from gold_crypto_quant.config import Settings
+from gold_crypto_quant.config import Settings, get_settings
 from gold_crypto_quant.market_data.binance_history import (
     BINANCE_LIVE_VENUE,
 )
@@ -26,7 +26,11 @@ from gold_crypto_quant.storage.market_health import refresh_market_health
 from gold_crypto_quant.storage.redis_bars import read_cursor
 from gold_crypto_quant.storage.shadow_monitor import record_shadow_cycle
 
-PUBLIC_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+ALL_COMPARISON_CONTRACTS = ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+ALL_COMPARISON_VENUES = (GATE_LIVE_VENUE, BINANCE_LIVE_VENUE)
+# 实际启用的由 .env 的 ACTIVE_SYMBOLS / ACTIVE_VENUES 决定，留空即全部。
+PUBLIC_COMPARISON_CONTRACTS = get_settings().enabled_symbols(ALL_COMPARISON_CONTRACTS)
+PUBLIC_COMPARISON_VENUES = get_settings().enabled_venues(ALL_COMPARISON_VENUES)
 PUBLIC_COMPARISON_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 # 单轮超过这个秒数才算节奏丢失——策略按收线K线推进，跨过整根才会漏掉判定。
 CYCLE_OVERRUN_SECONDS = 30.0
@@ -105,6 +109,16 @@ class CycleDurationWatch:
             return ""
         self.last_alert = now
         return "overrun"
+
+
+def _venue_state(label: str) -> str:
+    """区分"配置里停掉了"和"本轮拉取失败"。
+
+    前者是配置，不是故障——停跑的交易所每分钟报一次"行情异常"会让真正的故障
+    淹没在噪声里。
+    """
+    venue = GATE_LIVE_VENUE if label == "Gate" else BINANCE_LIVE_VENUE
+    return "已停用" if venue not in PUBLIC_COMPARISON_VENUES else "本轮行情异常"
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +354,8 @@ class PublicMarketComparisonRunner:
 
     def _refresh_health(self, venue: str) -> None:
         """在策略运行前确认该交易所全部公开行情流新鲜。"""
+        if venue not in PUBLIC_COMPARISON_VENUES:
+            return
         for contract in PUBLIC_COMPARISON_CONTRACTS:
             for interval in PUBLIC_COMPARISON_INTERVALS:
                 refresh_market_health(contract, interval, venue=venue)
@@ -379,7 +395,8 @@ class PublicMarketComparisonRunner:
         def account_line(label: str) -> str:
             item = by_label.get(label)
             if item is None:
-                return f"{label}影子账户：本轮行情异常"
+                # 停跑的交易所不该每分钟报一次"异常"——那是配置，不是故障。
+                return f"{label}影子账户：{_venue_state(label)}"
             return (
                 f"{label}影子账户：权益 {item.summary.paper_equity:.2f}U / "
                 f"状态 {item.summary.paper_status} / 新信号 {item.summary.new_signal_count}"
@@ -389,7 +406,7 @@ class PublicMarketComparisonRunner:
             """列出该账户此刻在场的仓位；手机上一眼看清手里还有什么。"""
             item = by_label.get(label)
             if item is None:
-                return f"{label}持仓：本轮行情异常"
+                return f"{label}持仓：{_venue_state(label)}"
             return f"{label}持仓：{item.summary.paper_holdings or '未知'}"
 
         gate = by_label.get("Gate")
@@ -426,6 +443,8 @@ class PublicMarketComparisonRunner:
                 ("Gate", GATE_LIVE_VENUE, GATE_LIVE_STATE_PATH),
                 ("币安", BINANCE_LIVE_VENUE, BINANCE_LIVE_STATE_PATH),
             ):
+                if venue not in PUBLIC_COMPARISON_VENUES:
+                    continue
                 advanced, health = self._cursor_advanced(venue)
                 self._report_source(label, venue, health)
                 bars_changed = bars_changed or advanced

@@ -4,11 +4,16 @@ from datetime import UTC, datetime, timedelta
 
 from gold_crypto_quant.runtime.bollinger_signal_cycle import BollingerSignalCycleSummary
 from gold_crypto_quant.runtime.public_market_comparison_runner import (
+    ALL_COMPARISON_CONTRACTS,
+    BINANCE_LIVE_VENUE,
+    GATE_LIVE_VENUE,
     PUBLIC_COMPARISON_CONTRACTS,
+    PUBLIC_COMPARISON_VENUES,
     ComparisonFeedResult,
     CycleDurationWatch,
     FeedOutageWatch,
     PublicMarketComparisonRunner,
+    _venue_state,
 )
 
 START = datetime(2026, 9, 3, 6, 0, tzinfo=UTC)
@@ -81,9 +86,26 @@ def test_equal_to_poll_interval_is_not_an_overrun() -> None:
     assert watch.observe(20.0, START) == ""
 
 
-def test_public_comparison_contracts_include_gold() -> None:
-    """双所对照必须同时覆盖BTC、ETH、XAU，避免后续误删黄金品种。"""
-    assert PUBLIC_COMPARISON_CONTRACTS == ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+def test_all_contracts_still_include_gold() -> None:
+    """可选品种表必须保留 XAU，避免代码里被误删。
+
+    实际启用哪些由 .env 的 ACTIVE_SYMBOLS 决定——停跑某个品种是配置行为，
+    不该靠删代码实现，否则想开回来就得改代码。
+    """
+    assert ALL_COMPARISON_CONTRACTS == ("BTC_USDT", "ETH_USDT", "XAU_USDT")
+    assert set(PUBLIC_COMPARISON_CONTRACTS) <= set(ALL_COMPARISON_CONTRACTS)
+    assert PUBLIC_COMPARISON_CONTRACTS, "不能把所有品种都停掉"
+
+
+def test_disabled_venue_is_not_reported_as_a_fault() -> None:
+    """配置里停掉的交易所显示"已停用"，不能报"本轮行情异常"。
+
+    停跑是配置，不是故障。每分钟报一次假异常会让真正的故障淹没在噪声里。
+    """
+    for label, venue in (("Gate", GATE_LIVE_VENUE), ("币安", BINANCE_LIVE_VENUE)):
+        expected = "本轮行情异常" if venue in PUBLIC_COMPARISON_VENUES else "已停用"
+        assert _venue_state(label) == expected
+    assert PUBLIC_COMPARISON_VENUES, "不能把所有交易所都停掉"
 
 
 def test_comparison_email_summary_shows_both_equities_and_difference() -> None:
@@ -147,8 +169,9 @@ def test_status_lines_mark_missing_feed_for_both_equity_and_holdings() -> None:
 
     lines = PublicMarketComparisonRunner._comparison_status_lines(results)
 
-    assert "币安影子账户：本轮行情异常" in lines
-    assert "币安持仓：本轮行情异常" in lines
+    expected = _venue_state("币安")
+    assert f"币安影子账户：{expected}" in lines
+    assert f"币安持仓：{expected}" in lines
 
 
 def test_feed_pipeline_is_isolated_per_venue() -> None:

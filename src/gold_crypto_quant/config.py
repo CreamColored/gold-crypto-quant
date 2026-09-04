@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     dingtalk_webhook: str | None = None
     dingtalk_secret: SecretStr | None = None
 
+    # 启用哪些交易所和品种。改成配置而不是写死，是为了停跑某一路时不用改代码——
+    # 停掉的那路会连行情采集一起停，省掉对应的 WebSocket 流量与策略计算。
+    # 留空即全部启用。
+    active_venues: str = ""
+    active_symbols: str = ""
+
     # 宏观数据发布前后暂停开仓。2026-09-04 非农那一分钟 BTC 振幅1155点、量放大12倍，
     # 影子账户在数据发布30秒后开了两笔多单并当场止损——震荡策略在数据驱动的单边启动
     # 里必然吃亏，而发布时刻是已知的：时间是确定的，形态是猜的。
@@ -80,6 +86,16 @@ class Settings(BaseSettings):
     oanda_practice_token: SecretStr | None = None
     oanda_practice_account_id: str | None = None
     oanda_practice_base_url: str = "https://api-fxpractice.oanda.com"
+
+    def enabled_venues(self, available: tuple[str, ...]) -> tuple[str, ...]:
+        """按配置过滤交易所；配的名字不在 available 里会被忽略而不是报错。"""
+        wanted = {item.strip() for item in self.active_venues.split(",") if item.strip()}
+        return tuple(v for v in available if not wanted or v in wanted)
+
+    def enabled_symbols(self, available: tuple[str, ...]) -> tuple[str, ...]:
+        """按配置过滤品种。"""
+        wanted = {item.strip() for item in self.active_symbols.split(",") if item.strip()}
+        return tuple(s for s in available if not wanted or s in wanted)
 
     @model_validator(mode="after")
     def reject_live_trading(self) -> "Settings":
