@@ -15,9 +15,11 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-MULTI_ROTATION_STRATEGY_VERSION = "5.7.0"
+MULTI_ROTATION_STRATEGY_VERSION = "5.8.0"
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
-ENTRY_INTERVAL_PRIORITY = INTERVAL_PRIORITY
+# 5分钟不再直接触发交易，但仍留在 INTERVAL_PRIORITY 里——顶底结构要查全部七个周期，
+# 把它从那里拿掉会连结构判定一起丢掉。已经持有的5m仓位照常按原周期管理到结束。
+ENTRY_INTERVAL_PRIORITY = ("15m", "30m", "1h")
 SYMBOL_PRIORITY = ("BTC_USDT", "ETH_USDT")
 INTERVAL_DURATION = {
     "5m": pd.Timedelta(minutes=5),
@@ -29,11 +31,19 @@ DEFAULT_MULTI_STATE_PATH = Path(".runtime/bollinger-multi-symbol-paper-v5.json")
 LEGACY_MULTI_STATE_PATH = Path(".runtime/bollinger-multi-timeframe-paper-v4.json")
 ETH_RULE_REFERENCE_PRICE = 2_500.0
 PAPER_LEVERAGE = 125.0
+# 止损距离改为不分周期的固定点数。仓位按 equity×risk_per_trade÷止损距离 反推，
+# 因此放宽止损等于缩小仓位，每单风险仍是账户的 0.25%，不会因为止损变宽而多亏。
 FIXED_STOP_DISTANCE = {
-    "BTC_USDT": {"5m": 250.0, "15m": 250.0, "30m": 500.0, "1h": 500.0},
-    "ETH_USDT": {"5m": 5.0, "15m": 5.0, "30m": 10.0, "1h": 10.0},
+    "BTC_USDT": {"5m": 300.0, "15m": 300.0, "30m": 300.0, "1h": 300.0},
+    "ETH_USDT": {"5m": 12.0, "15m": 12.0, "30m": 12.0, "1h": 12.0},
 }
-OTHER_SYMBOL_STOP_RETURN = 0.40
+# 其余品种按125倍杠杆下浮亏100%换算：价格反向波动 1.00/125 = 0.8%。
+OTHER_SYMBOL_STOP_RETURN = 1.00
+
+# 中轨减仓比例。第一次减仓落在中轨，无论有没有顶底结构都是30%。
+MIDDLE_REDUCE_RATIO = 0.30
+# 第二次及以后的减仓——对侧轨结构确认、以及结构延续阶梯——仍是50%。
+LADDER_REDUCE_RATIO = 0.50
 
 # 手续费按币安与Gate的U本位永续VIP0公开费率：挂单0.02%、吃单0.05%。
 # 不要改回负的maker费率——那是VIP4以上才有的挂单返佣，普通账户拿不到。
@@ -165,7 +175,7 @@ def _load_state(path: Path) -> MultiTimeframePaperState | None:
     raw_positions = payload.pop("positions", {})
     stored_version = str(payload.get("strategy_version", ""))
     # 旧V5状态可原地升级：保留权益和已有仓位，仅补上新增的安全游标和等待字段。
-    if stored_version in {"5.3.0", "5.4.0", "5.5.0", "5.6.0"}:
+    if stored_version in {"5.3.0", "5.4.0", "5.5.0", "5.6.0", "5.7.0"}:
         payload["strategy_version"] = MULTI_ROTATION_STRATEGY_VERSION
         payload.setdefault(
             "symbol_blocked_after_stop",
@@ -1291,10 +1301,10 @@ def run_multi_timeframe_paper_cycle(
                         if ladder_hit:
                             close_quantity(
                                 symbol,
-                                position.remaining_quantity * 0.5,
+                                position.remaining_quantity * LADDER_REDUCE_RATIO,
                                 trigger,
                                 minute_open_time,
-                                f"结构延续：每{step:.2f}点阶梯减仓50%",
+                                f"结构延续：每{step:.2f}点阶梯减仓{LADDER_REDUCE_RATIO:.0%}",
                                 market=False,
                             )
                             going_long = position.position_side == "LONG"
@@ -1319,10 +1329,11 @@ def run_multi_timeframe_paper_cycle(
                             step = _ladder_step_points(bars_by_symbol[symbol][interval])
                             close_quantity(
                                 symbol,
-                                position.remaining_quantity * 0.5,
+                                position.remaining_quantity * LADDER_REDUCE_RATIO,
                                 target,
                                 minute_open_time,
-                                f"对侧轨结构确认：减仓50%延续原方向，不反手（步长{step:.2f}点）",
+                                f"对侧轨结构确认：减仓{LADDER_REDUCE_RATIO:.0%}延续原方向，"
+                                f"不反手（步长{step:.2f}点）",
                                 market=False,
                             )
                             # 止损收到开仓当时的中轨，而不是随后漂移过的当前中轨。
@@ -1390,14 +1401,16 @@ def run_multi_timeframe_paper_cycle(
                             and float(minute_bar["low"]) <= middle_trigger
                         )
                         if middle_hit and not position.middle_reduced:
+                            percent = f"{MIDDLE_REDUCE_RATIO:.0%}"
                             middle_reason = (
-                                f"距离中轨{position.middle_advance_distance:.2f}点提前减仓50%"
+                                f"距离中轨{position.middle_advance_distance:.2f}点"
+                                f"提前减仓{percent}"
                                 if position.middle_advance_distance > 0
-                                else "到达中轨减仓50%"
+                                else f"到达中轨减仓{percent}"
                             )
                             close_quantity(
                                 symbol,
-                                position.remaining_quantity * 0.5,
+                                position.remaining_quantity * MIDDLE_REDUCE_RATIO,
                                 middle_trigger,
                                 minute_open_time,
                                 middle_reason,

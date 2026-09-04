@@ -282,7 +282,12 @@ def _invalidate_sideways_before_last_bar(bars: pd.DataFrame) -> None:
         bars.iloc[offset, bars.columns.get_loc("low")] = close - 1.0
 
 
-def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
+def test_multi_timeframe_prefers_15m_and_never_enters_on_5m(tmp_path) -> None:
+    """5分钟不再直接触发交易，最高优先级的开仓周期是15分钟。
+
+    5m 仍然留在 INTERVAL_PRIORITY 里——顶底结构要查全部七个周期，把它从那里拿掉会
+    连结构判定一起丢掉；只是它不再出现在 ENTRY_INTERVAL_PRIORITY 中。
+    """
     bars_by_interval = _bars_by_interval()
     micro = _micro_bars()
     state_path = tmp_path / "multi.json"
@@ -293,7 +298,6 @@ def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
     )
     _touch_band(micro, float(context.iloc[-1]["bb_upper"]), upper=True)
 
-    # 四个周期同一时刻都有箱体且触上轨时，只允许最高优先级5m开空。
     summary = run_multi_timeframe_paper_cycle(
         bars_by_interval,
         micro_bars_by_symbol={"ETH_USDT": micro},
@@ -301,8 +305,19 @@ def test_multi_timeframe_prefers_5m_when_all_intervals_touch(tmp_path) -> None:
     )
 
     assert summary.position_side == "SHORT"
-    assert summary.active_interval == "5m"
+    assert summary.active_interval == "15m"
     assert sum("模拟开仓" in event.title for event in summary.events) == 1
+
+
+def test_five_minute_stays_in_structure_but_not_in_entries() -> None:
+    """5m 退出开仓优先级，但必须仍在结构判定的周期集合里。"""
+    from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
+        ENTRY_INTERVAL_PRIORITY,
+    )
+
+    assert "5m" not in ENTRY_INTERVAL_PRIORITY
+    assert ENTRY_INTERVAL_PRIORITY == ("15m", "30m", "1h")
+    assert "5m" in INTERVAL_PRIORITY
 
 
 def test_multi_timeframe_falls_back_to_30m_when_15m_is_not_sideways(tmp_path) -> None:
@@ -747,3 +762,68 @@ def test_entry_allowed_blocks_new_positions_only(monkeypatch) -> None:
         block_start = source.index(f"{path} = ")
         block = source[block_start:block_start + 600]
         assert "switch_allows_entry" not in block
+
+
+def test_reduce_ratios_differ_between_first_and_later_cuts() -> None:
+    """第一次减仓（中轨）30%，第二次及以后（对侧轨结构确认、阶梯延续）仍是50%。"""
+    from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
+        LADDER_REDUCE_RATIO,
+        MIDDLE_REDUCE_RATIO,
+    )
+
+    assert MIDDLE_REDUCE_RATIO == 0.30
+    assert LADDER_REDUCE_RATIO == 0.50
+
+
+def test_stop_distances_are_flat_across_intervals() -> None:
+    """止损改为不分周期的固定点数：大饼300、二饼12。
+
+    仓位按 equity×risk_per_trade÷止损距离 反推，放宽止损等于缩小仓位，每单风险
+    仍是账户的 0.25%——止损变宽不会让单笔亏得更多。
+    """
+    from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
+        FIXED_STOP_DISTANCE,
+        OTHER_SYMBOL_STOP_RETURN,
+        PAPER_LEVERAGE,
+    )
+
+    assert set(FIXED_STOP_DISTANCE["BTC_USDT"].values()) == {300.0}
+    assert set(FIXED_STOP_DISTANCE["ETH_USDT"].values()) == {12.0}
+    # 其余品种：125倍杠杆下浮亏100% = 价格反向波动 0.8%
+    assert OTHER_SYMBOL_STOP_RETURN == 1.00
+    assert OTHER_SYMBOL_STOP_RETURN / PAPER_LEVERAGE == pytest.approx(0.008)
+
+
+def test_middle_band_reduce_takes_thirty_percent(tmp_path) -> None:
+    """中轨减仓要减掉当前剩余仓位的30%，且不改动止损以外的既有逻辑。"""
+    bars_by_interval = _bars_by_interval()
+    micro = _micro_bars()
+    state_path = tmp_path / "middle.json"
+    _initialize(bars_by_interval, state_path, micro)
+    _activate_boxes(state_path, ("ETH_USDT",), INTERVAL_PRIORITY)
+    context = build_rotation_box_context(
+        bars_by_interval["15m"], parameters_for_same_timeframe("15m")
+    )
+    lower = float(context.iloc[-1]["bb_lower"])
+    _touch_band(micro, lower, upper=False)
+    opened = run_multi_timeframe_paper_cycle(
+        bars_by_interval, micro_bars_by_symbol={"ETH_USDT": micro}, state_path=state_path
+    )
+    assert opened.position_side == "LONG"
+    before = json.loads(state_path.read_text(encoding="utf-8"))["positions"]["ETH_USDT"]
+    quantity = float(before["remaining_quantity"])
+
+    middle = float(context.iloc[-1]["bb_middle"])
+    extended = micro.copy()
+    moment = extended.index[-1] + pd.Timedelta(minutes=1)
+    extended.loc[moment] = {
+        "open": middle - 0.1, "high": middle + 1.0, "low": middle - 0.2,
+        "close": middle + 0.5, "volume": 10.0, "quote_volume": 1000.0,
+    }
+    summary = run_multi_timeframe_paper_cycle(
+        bars_by_interval, micro_bars_by_symbol={"ETH_USDT": extended}, state_path=state_path
+    )
+    reduce_events = [e for e in summary.events if "减仓" in e.title or "减仓" in " ".join(e.lines)]
+    assert reduce_events, "触及中轨应当产生一次减仓"
+    after = json.loads(state_path.read_text(encoding="utf-8"))["positions"]["ETH_USDT"]
+    assert float(after["remaining_quantity"]) == pytest.approx(quantity * 0.70, rel=1e-6)
