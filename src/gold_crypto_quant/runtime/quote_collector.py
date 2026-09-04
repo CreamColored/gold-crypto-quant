@@ -259,6 +259,7 @@ class QuoteCollector:
                 contracts=self.contracts,
                 intervals=PUBLIC_INTERVALS,
                 refreshed=self._refreshed[venue],
+                reporter=self.reporter,
                 limit=500,
                 **kwargs,
             )

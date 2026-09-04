@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
+from gold_crypto_quant.market_data import live_refresh
 from gold_crypto_quant.market_data.live_refresh import (
     due_intervals,
     last_closed_open_time,
@@ -151,6 +152,94 @@ def test_delisting_check_propagates(monkeypatch) -> None:
     monkeypatch.setattr("gold_crypto_quant.market_data.live_refresh._store_frame",
                         lambda *a, **k: (0, 0))
     monkeypatch.setattr("gold_crypto_quant.market_data.live_refresh.Session", _FakeSession)
+    with pytest.raises(RuntimeError, match="delisting"):
+        refresh_live_bars(
+            fetch=lambda c, i: _frame(),
+            ensure_instrument=lambda s, c: _Instrument(),  # noqa: ARG005
+            check_contract=check,
+            contracts=("BTC_USDT",),
+            intervals=INTERVALS,
+            refreshed={},
+            engine=object(),
+        )
+
+
+def test_one_failing_interval_does_not_kill_the_batch(monkeypatch) -> None:
+    """单个周期抓取失败不能炸掉整批。
+
+    2026-09-04 夜里代理变慢（单次往返410ms涨到1300ms）时踩过：冷启动15个周期全部
+    到期，任何一个超时就让整个函数抛出，水位一个都不推进，下一轮又是全量冷启动
+    ——连续三轮全超时，K线卡在90分钟前不动，靠自己爬不出来。
+    """
+    refreshed: dict[str, datetime] = {}
+    fetched = []
+
+    def fetch(contract, interval):
+        fetched.append(interval)
+        if interval == "5m":
+            raise TimeoutError("模拟超时")
+        return _frame()
+
+    results, _calls = _run(monkeypatch, fetch=fetch, refreshed=refreshed)
+    # 失败的周期不推进水位，成功的照常推进——下一轮只重试失败的那个
+    assert "5m" not in refreshed
+    assert {"1m", "15m", "30m", "1h"} <= set(refreshed)
+    assert all(item.interval != "5m" for item in results)
+
+
+def test_failures_are_reported(monkeypatch) -> None:
+    """失败必须留痕。静默跳过会让"拉不到K线"变成看不见的故障。"""
+    monkeypatch.setattr(live_refresh, "_store_frame", lambda *a, **k: (1, 0))
+    monkeypatch.setattr(live_refresh, "Session", _FakeSession)
+    messages: list[str] = []
+
+    def fetch(contract, interval):
+        if interval == "1h":
+            raise ConnectionError("boom")
+        return _frame()
+
+    refresh_live_bars(
+        fetch=fetch,
+        ensure_instrument=lambda s, c: _Instrument(),  # noqa: ARG005
+        contracts=("BTC_USDT",),
+        intervals=INTERVALS,
+        refreshed={},
+        reporter=messages.append,
+        engine=object(),
+    )
+    assert messages and "1h" in messages[0]
+
+
+def test_network_error_on_contract_check_is_not_treated_as_delisting(monkeypatch) -> None:
+    """取不到合约状态只是网络故障，不能等同于下架而中止采集。"""
+    monkeypatch.setattr(live_refresh, "_store_frame", lambda *a, **k: (1, 0))
+    monkeypatch.setattr(live_refresh, "Session", _FakeSession)
+
+    def check(contract):
+        raise TimeoutError("代理超时")
+
+    messages: list[str] = []
+    results = refresh_live_bars(
+        fetch=lambda c, i: _frame(),
+        ensure_instrument=lambda s, c: _Instrument(),  # noqa: ARG005
+        check_contract=check,
+        contracts=("BTC_USDT",),
+        intervals=INTERVALS,
+        refreshed={},
+        reporter=messages.append,
+        engine=object(),
+    )
+    assert results, "网络故障不该让整批作废"
+
+
+def test_real_delisting_still_aborts(monkeypatch) -> None:
+    """真下架必须中止——那是不能继续采集的情况。"""
+    monkeypatch.setattr(live_refresh, "_store_frame", lambda *a, **k: (1, 0))
+    monkeypatch.setattr(live_refresh, "Session", _FakeSession)
+
+    def check(contract):
+        raise RuntimeError(f"Gate contract is delisting: {contract}")
+
     with pytest.raises(RuntimeError, match="delisting"):
         refresh_live_bars(
             fetch=lambda c, i: _frame(),

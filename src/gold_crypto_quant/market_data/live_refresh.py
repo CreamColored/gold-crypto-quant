@@ -76,6 +76,7 @@ def refresh_live_bars(
     intervals: tuple[str, ...],
     refreshed: MutableMapping[str, datetime],
     check_contract: Callable[[str], None] | None = None,
+    reporter: Callable[[str], None] | None = None,
     engine: Engine | None = None,
     now: datetime | None = None,
     max_workers: int = 8,
@@ -95,9 +96,22 @@ def refresh_live_bars(
     jobs = [(contract, interval) for contract in contracts for interval in due]
 
     # 下架检查和K线抓取都是纯网络调用，一起并发；两者都不碰数据库。
-    def fetch_one(job: tuple[str, str]) -> tuple[str, str, pd.DataFrame]:
+    #
+    # 每个任务单独兜住异常，不能让一次超时炸掉整批。2026-09-04 夜里代理变慢
+    # （单次往返从410毫秒涨到1300毫秒）时踩过：冷启动15个周期全部到期，任何一个
+    # 超时就让整个函数抛出，水位一个都不推进，下一轮又是全量冷启动——连续三轮
+    # 全超时，K线卡在90分钟前不动。失败的周期跳过、成功的照常推进，才能逐步爬出来。
+    failed_intervals: set[str] = set()
+    failures: list[str] = []
+
+    def fetch_one(job: tuple[str, str]) -> tuple[str, str, pd.DataFrame] | None:
         contract, interval = job
-        return contract, interval, fetch(contract, interval)
+        try:
+            return contract, interval, fetch(contract, interval)
+        except Exception as error:  # noqa: BLE001 - 单个周期失败不该拖垮整批
+            failed_intervals.add(interval)
+            failures.append(f"{contract} {interval}：{type(error).__name__}")
+            return None
 
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="refresh") as pool:
         contract_checks = (
@@ -105,13 +119,22 @@ def refresh_live_bars(
             if check_contract is not None
             else []
         )
-        fetched = list(pool.map(fetch_one, jobs))
-        # 下架属于必须中止采集的情况，异常照常向上抛。
+        fetched = [item for item in pool.map(fetch_one, jobs) if item is not None]
         for check in contract_checks:
-            check.result()
+            try:
+                check.result()
+            except Exception as error:  # noqa: BLE001
+                # 下架必须中止，但网络故障只是取不到状态，不该等同于下架。
+                if "delisting" in str(error):
+                    raise
+                failures.append(f"合约状态检查：{type(error).__name__}")
+
+    if failures and reporter is not None:
+        reporter(f"刷新失败 {len(failures)} 项：{'；'.join(failures[:4])}")
+    if not fetched:
+        return []
 
     results: list[LiveRefreshResult] = []
-    failed_intervals: set[str] = set()
     with Session(engine) as session:
         instrument_ids: dict[str, int] = {}
         for contract in contracts:

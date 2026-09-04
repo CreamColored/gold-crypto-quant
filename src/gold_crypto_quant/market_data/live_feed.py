@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from datetime import datetime
 
 from sqlalchemy import Engine
@@ -36,6 +36,7 @@ def refresh_gate_live_bars(
     contracts: tuple[str, ...],
     intervals: tuple[str, ...],
     refreshed: MutableMapping[str, datetime],
+    reporter: Callable[[str], None] | None = None,
     limit: int = 500,
     venue: str = GATE_TESTNET_VENUE,
     engine: Engine | None = None,
@@ -60,6 +61,7 @@ def refresh_gate_live_bars(
         contracts=contracts,
         intervals=intervals,
         refreshed=refreshed,
+        reporter=reporter,
         engine=engine,
     )
 
@@ -70,6 +72,7 @@ def refresh_binance_live_bars(
     contracts: tuple[str, ...],
     intervals: tuple[str, ...],
     refreshed: MutableMapping[str, datetime],
+    reporter: Callable[[str], None] | None = None,
     limit: int = 500,
     engine: Engine | None = None,
 ) -> list[LiveRefreshResult]:
@@ -87,5 +90,6 @@ def refresh_binance_live_bars(
         contracts=contracts,
         intervals=intervals,
         refreshed=refreshed,
+        reporter=reporter,
         engine=engine,
     )
