@@ -79,7 +79,7 @@ def _build_system_status_lines(process_id: int | None, now: datetime) -> tuple[s
             "",
             "Mac服务器状态",
             f"主机：{platform.node() or '-'}",
-            f"系统：macOS {platform.mac_ver()[0] or '-'} / {platform.machine()}",
+            f"系统：{platform.platform(terse=True)} / {platform.machine()}",
             f"整机CPU：{cpu_percent:.1f}%",
             f"系统负载：{load_1m:.2f} / {load_5m:.2f} / {load_15m:.2f}",
             (

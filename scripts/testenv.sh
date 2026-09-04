@@ -46,6 +46,15 @@ cmdline() {
   esac
 }
 
+# GNU 与 BSD 的 stat 参数不兼容：macOS 是 -f %m，Linux/WSL2 是 -c %Y。
+# 探测一次而不是按 uname 分支——WSL2 里 uname 报 Linux，但同一台机器上
+# 可能同时有 GNU coreutils 和 busybox，直接试哪个能用最可靠。
+if stat -c %Y . >/dev/null 2>&1; then
+  mtime() { stat -c %Y "$1"; }
+else
+  mtime() { stat -f %m "$1"; }
+fi
+
 pidfile() { echo "$LOG_DIR/$1.pid"; }
 logfile() { echo "$LOG_DIR/$1.log"; }
 
@@ -93,7 +102,7 @@ status_one() {
   local pid age
   pid="$(cat "$(pidfile "$name")")"
   if [[ -f "$lf" ]]; then
-    age=$(( $(date +%s) - $(stat -f %m "$lf") ))
+    age=$(( $(date +%s) - $(mtime "$lf") ))
     printf "  %-10s 运行中  pid %-7s 日志 %ss 前更新\n" "$name" "$pid" "$age"
   else
     printf "  %-10s 运行中  pid %-7s 尚无日志\n" "$name" "$pid"

@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -592,7 +593,8 @@ def build_system_status(engine: Engine | None = None) -> dict[str, Any]:
         comparison_pid = None
     return {
         "generated_at": datetime.now(UTC).isoformat(),
-        "hostname": os.uname().nodename,
+        # platform.node() 在 Linux/WSL2/Windows 上都有；os.uname 只有 POSIX 有。
+        "hostname": platform.node(),
         "cpu_percent": psutil.cpu_percent(interval=0.1),
         "memory_percent": memory.percent,
         "memory_used_gib": (memory.total - memory.available) / 1024**3,
