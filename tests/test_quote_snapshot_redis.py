@@ -95,3 +95,39 @@ def test_timestamp_is_the_bucket_not_now(monkeypatch) -> None:
     _Collector()._publish_snapshots(_drained())
     for _key, mapping in sink:
         assert mapping["ts"].startswith("2026-09-04T05:00:0")
+
+
+def test_second_quotes_are_no_longer_stored() -> None:
+    """秒级盘口不再落库：一天97MB，而唯一需要历史的读者已被证明无差别。
+
+    秒级回测与1m回测在固定窗口下逐字节相同——模拟器的成交价永远取轨道价，
+    早一秒察觉不改变记录下来的成交。分钟级聚合保留，作为粗粒度留档。
+    """
+    assert quote_collector.STORE_SECOND_QUOTES is False
+
+
+def test_flush_still_writes_minute_aggregates(monkeypatch) -> None:
+    """秒级停写，分钟级必须照写——它是唯一剩下的盘口历史留档。"""
+    written = []
+
+    class _Collector:
+        flush = quote_collector.QuoteCollector.flush
+        _instrument_ids = {("V", "S"): 1}
+
+        def drain_seconds(self, now):  # noqa: ARG002
+            bucket = QuoteBucket(1.0, 2.0, 3.0, 4.0, 5, bid_close=1.5, ask_close=3.5)
+            return [("V", "S", datetime(2026, 9, 4, 12, 0, 1, tzinfo=UTC), bucket)]
+
+        def drain_minutes(self, now):  # noqa: ARG002
+            bucket = QuoteBucket(1.0, 2.0, 3.0, 4.0, 5, bid_close=1.5, ask_close=3.5)
+            return [("V", "S", datetime(2026, 9, 4, 12, 0, tzinfo=UTC), bucket, 60)]
+
+        def _write(self, table, rows):
+            written.append(table.__name__)
+
+        def _publish_snapshots(self, drained):
+            pass
+
+    _Collector().flush(datetime(2026, 9, 4, 12, 1, tzinfo=UTC))
+    assert "MarketQuoteSecond" not in written
+    assert "MarketQuoteMinute" in written

@@ -21,7 +21,6 @@ from gold_crypto_quant.storage.models import (
     Instrument,
     MarketBar,
     MarketDataHealthState,
-    MarketQuoteSecond,
     ShadowEquitySnapshot,
     ShadowTradeEvent,
     TradingAccount,
@@ -310,6 +309,31 @@ def build_switch_view(switches: dict[str, bool]) -> dict:
     }
 
 
+def _redis_quote(venue: str, symbol: str) -> dict[str, Any] | None:
+    """从 Redis 读该品种的最新盘口快照。
+
+    秒级盘口不再落库之后，最新一帧只存在于 Redis。Redis 不可达时返回 None，页面
+    显示"无数据"而不是抛错——监管页面自己不能因为缓存挂了就打不开。
+    """
+    try:
+        from gold_crypto_quant.storage.redis_client import build_redis, quote_key
+
+        raw = build_redis().hgetall(quote_key(venue, symbol))
+    except Exception:  # noqa: BLE001 - 缓存不可达时页面照常打开
+        return None
+    if not raw or "ts" not in raw:
+        return None
+    try:
+        return {
+            "bid": float(raw["bid"]),
+            "ask": float(raw["ask"]),
+            "frames": int(raw.get("frames", 0)),
+            "ts": datetime.fromisoformat(raw["ts"]),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
 def build_live_quotes(
     engine: Engine,
     *,
@@ -319,37 +343,23 @@ def build_live_quotes(
 ) -> dict:
     """返回指定交易所与品种的最新盘口。
 
-    数据来自盘口采集器写入的秒级聚合表，不是浏览器直连交易所——展示的是
-    "最近一秒的极值"，不是逐帧跳动。因此必须带上数据年龄：采集器停掉时页面要
-    看得出来，而不是继续显示几小时前的价格还一副正常样子。
+    数据来自 Redis 里的盘口快照（采集器每秒写一次），不是浏览器直连交易所。必须
+    带上数据年龄：采集器停掉时 Redis 里的键还在、值还是旧的，读取端收不到任何错误，
+    页面会继续显示几小时前的价格还一副正常样子——只有比对时间戳才看得出来。
 
-    买一取该秒的最高买价、卖一取该秒的最低卖价，即这一秒里最紧的盘口。
+    买一卖一取同一帧的快照，不是秒内极值：极值来自不同瞬间，拼在一起会得到买一
+    高于卖一的交叉盘口。
     """
     now = datetime.now(UTC)
-    with Session(engine) as session:
-        record = session.execute(
-            select(MarketQuoteSecond)
-            .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
-            .where(Instrument.venue == venue, Instrument.symbol == symbol)
-            .order_by(MarketQuoteSecond.bucket_time.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-
+    record = _redis_quote(venue, symbol)
     if record is None:
         return {
             "venue": venue, "symbol": symbol, "available": False,
-            "reason": "盘口采集器尚未写入该品种数据",
+            "reason": "采集器尚未写入该品种快照，或Redis不可达",
             "generated_at": now.isoformat(),
         }
-    age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
-    # 展示当前价必须用同一帧的快照：极值来自秒内不同瞬间，
-    # 拿最高买价配最低卖价会得到买一高于卖一的交叉盘口。
-    # 快照列是后加的，改动前写入的旧行没有值，退回用极值中点近似。
-    if record.bid_close is not None and record.ask_close is not None:
-        bid, ask = float(record.bid_close), float(record.ask_close)
-    else:
-        bid = (float(record.bid_low) + float(record.bid_high)) / 2
-        ask = (float(record.ask_low) + float(record.ask_high)) / 2
+    age = (now - record["ts"]).total_seconds()
+    bid, ask = record["bid"], record["ask"]
     return {
         "venue": venue,
         "symbol": symbol,
@@ -358,10 +368,11 @@ def build_live_quotes(
         "ask": ask,
         "mid": (bid + ask) / 2,
         "spread": ask - bid,
-        "second_low": float(record.bid_low),
-        "second_high": float(record.ask_high),
-        "frame_count": record.frame_count,
-        "bucket_time": record.bucket_time.replace(tzinfo=UTC).isoformat(),
+        # 快照只保留同一帧的买一卖一，不再有秒内极值——秒级聚合已不落库。
+        "second_low": bid,
+        "second_high": ask,
+        "frame_count": record["frames"],
+        "bucket_time": record["ts"].isoformat(),
         "age_seconds": round(age, 1),
         "stale": age > stale_after_seconds,
         "generated_at": now.isoformat(),
@@ -521,30 +532,23 @@ def build_quote_collector_health(engine: Engine) -> dict[str, Any]:
     """
     now = datetime.now(UTC)
     streams: list[dict[str, Any]] = []
-    with Session(engine) as session:
-        for venue, label in ((GATE_LIVE_VENUE, "Gate"), (BINANCE_LIVE_VENUE, "币安")):
-            for symbol in QUOTE_SYMBOLS:
-                record = session.execute(
-                    select(MarketQuoteSecond)
-                    .join(Instrument, Instrument.id == MarketQuoteSecond.instrument_id)
-                    .where(Instrument.venue == venue, Instrument.symbol == symbol)
-                    .order_by(MarketQuoteSecond.bucket_time.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                if record is None:
-                    streams.append({"label": label, "symbol": symbol, "age_seconds": None,
-                                    "frame_count": 0, "status": "NO_DATA"})
-                    continue
-                age = (now - record.bucket_time.replace(tzinfo=UTC)).total_seconds()
-                status = (
-                    "HEALTHY" if age <= QUOTE_COLLECTOR_STALE_SECONDS
-                    else "STALE" if age <= QUOTE_COLLECTOR_DOWN_SECONDS
-                    else "STOPPED"
-                )
-                streams.append({
-                    "label": label, "symbol": symbol, "age_seconds": round(age, 1),
-                    "frame_count": record.frame_count, "status": status,
-                })
+    for venue, label in ((GATE_LIVE_VENUE, "Gate"), (BINANCE_LIVE_VENUE, "币安")):
+        for symbol in QUOTE_SYMBOLS:
+            record = _redis_quote(venue, symbol)
+            if record is None:
+                streams.append({"label": label, "symbol": symbol, "age_seconds": None,
+                                "frame_count": 0, "status": "NO_DATA"})
+                continue
+            age = (now - record["ts"]).total_seconds()
+            status = (
+                "HEALTHY" if age <= QUOTE_COLLECTOR_STALE_SECONDS
+                else "STALE" if age <= QUOTE_COLLECTOR_DOWN_SECONDS
+                else "STOPPED"
+            )
+            streams.append({
+                "label": label, "symbol": symbol, "age_seconds": round(age, 1),
+                "frame_count": record["frames"], "status": status,
+            })
     ages = [item["age_seconds"] for item in streams if item["age_seconds"] is not None]
     # 整体取最差的一条：任何一条流停了都说明采集不完整，不能被其他流掩盖。
     if not ages:

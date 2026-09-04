@@ -222,3 +222,29 @@ def replay_progression(
             )
         )
     return out
+
+
+def rebuild_from_redis(
+    venue: str, symbol: str, *, now: datetime | None = None
+) -> ProvisionalMinute | None:
+    """重启时从 Redis 里已有的第501根接着累加。
+
+    Redis 里那根就是重启前最后一次写的在途K线，包含这一分钟已经走过的部分。只有当
+    它属于更早的分钟时才丢弃——那说明停机跨过了分钟边界，前面的部分无从得知，从下
+    一帧重新开始比拿着错的 open 继续累加要好。
+
+    取代了原先从 market_quotes_second 重建的做法：秒级盘口不再落库，而 Redis 里
+    本来就存着同一份信息。
+    """
+    from gold_crypto_quant.storage.redis_bars import read_bars
+
+    minute = floor_to_minute(now or datetime.now(UTC))
+    frame = read_bars(venue, symbol, "1m", limit=1, include_provisional=True)
+    if frame.empty or not bool(frame["provisional"].iloc[-1]):
+        return None
+    row = frame.iloc[-1]
+    if row.name.to_pydatetime() != minute:
+        return None
+    return ProvisionalMinute(
+        minute, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+    )

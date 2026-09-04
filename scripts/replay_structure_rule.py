@@ -57,7 +57,7 @@ def load_bars(end: pd.Timestamp):
 def run(
     tag, minutes, main, micro, state_dir, *,
     disable_structure, reward_risk=0.0, seconds=None, dwell=3.0, second_step=1,
-    legacy_params=False,
+    legacy_params=False, reversal_min_bars=0,
 ):
     """逐分钟调用模拟器；disable_structure为真时把结构判定整体短路成False。
 
@@ -74,6 +74,22 @@ def run(
         sim.ENTRY_INTERVAL_PRIORITY, sim.MIDDLE_REDUCE_RATIO,
         sim.FIXED_STOP_DISTANCE, sim.OTHER_SYMBOL_STOP_RETURN,
     )
+    # 反手过滤：止盈那一刻，如果当前这组MACD柱体刚起（根数≤阈值），说明这个方向的
+    # 动能还很新，不要逆着它反手。只挂在反手这一个位置上，正常开仓不经过这个钩子。
+    #
+    # 口径按对称理解：多单在上轨止盈时看红柱组，空单在下轨止盈时看绿柱组——都是
+    # "刚完成的那一段走势对应的柱体"。两边都只看红柱在第二种情形下讲不通：价格
+    # 跌到下轨时柱是绿的，"刚出红柱"反而是转涨信号，那是支持做多而不是阻止。
+    reversal_blocked = [0]
+    if reversal_min_bars > 0:
+        def _filter(symbol, interval, new_side, moment, bars):  # noqa: ARG001
+            _sign, run = sim.current_histogram_run(bars)
+            if run and run <= reversal_min_bars:
+                reversal_blocked[0] += 1
+                return False
+            return True
+
+        sim.REVERSAL_FILTER = _filter
     if legacy_params:
         sim.ENTRY_INTERVAL_PRIORITY = sim.INTERVAL_PRIORITY
         sim.MIDDLE_REDUCE_RATIO = 0.50
@@ -142,6 +158,9 @@ def run(
             sim.ENTRY_INTERVAL_PRIORITY, sim.MIDDLE_REDUCE_RATIO,
             sim.FIXED_STOP_DISTANCE, sim.OTHER_SYMBOL_STOP_RETURN,
         ) = legacy_original
+        sim.REVERSAL_FILTER = None
+        if reversal_min_bars > 0:
+            print(f"  {tag} 反手被过滤 {reversal_blocked[0]} 次", flush=True)
         # 参数变了，指标与K线缓存的键里不含这些常量，必须整体作废。
         sim.reset_context_cache()
     return [
@@ -209,9 +228,18 @@ def parse_arguments(argv):
         help="开仓赔率门槛：到中轨距离 ÷ 止损距离 低于该值就不开单，0=不启用",
     )
     parser.add_argument(
+        "--reversal-min-bars",
+        type=int,
+        default=0,
+        help=(
+            "反手过滤：止盈那一刻当前这组MACD柱体不超过该根数就不反手，0=不启用。"
+            "只作用于反手开仓，正常开仓不受影响。"
+        ),
+    )
+    parser.add_argument(
         "--legacy-params",
         action="store_true",
-        help="用 V5.7 的参数跑（5m参与开仓、中轨减仓50%、旧止损距离），用于新旧对照",
+        help="用 V5.7 的参数跑（5m参与开仓、中轨减仓50%%、旧止损距离），用于新旧对照",
     )
     parser.add_argument(
         "--until",
@@ -301,6 +329,7 @@ def main(argv=None) -> int:
             disable_structure=disabled, reward_risk=args.reward_risk,
             seconds=seconds, dwell=args.dwell, second_step=max(1, args.second_step),
             legacy_params=args.legacy_params,
+            reversal_min_bars=args.reversal_min_bars,
         )
         trades = ledger(events)
         opening_equity = 10_000.0

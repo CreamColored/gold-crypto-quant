@@ -36,7 +36,7 @@ from gold_crypto_quant.market_data.live_feed import (
 )
 from gold_crypto_quant.runtime.provisional_bars import (
     ProvisionalTracker,
-    rebuild_from_seconds,
+    rebuild_from_redis,
 )
 from gold_crypto_quant.storage.database import build_engine
 from gold_crypto_quant.storage.models import Instrument, MarketQuoteMinute, MarketQuoteSecond
@@ -55,6 +55,13 @@ GATE_WS_URL = "wss://fx-ws.gateio.ws/v4/ws/usdt"
 # 断线重连退避；上限不宜太大，盘口断开期间无法事后补齐。
 RECONNECT_BACKOFF = (1.0, 2.0, 5.0, 10.0, 20.0)
 SECOND_FLUSH_INTERVAL = 1.0
+# 秒级盘口不再落库：一天97MB，而唯一需要历史的读者（秒级回测）已经证明与1m回测
+# 结果逐字节相同——模拟器的成交价永远取轨道价，早一秒察觉不改变记录下来的成交。
+# 分钟级聚合保留（一天3MB），作为点差与盘口质量的粗粒度历史留档。
+#
+# 前端实时价、采集器健康、重启补在途K线，三处都改读 Redis：那里本来就有最新快照，
+# 比查库更快也更直接。
+STORE_SECOND_QUOTES = False
 # 每秒把在途K线推给 Redis；策略据此在分钟内也能看到价格变化。
 PROVISIONAL_PUBLISH_INTERVAL = 1.0
 # 收线后等这么久再拉。所有周期（1m/5m/15m/30m/1h）都对齐UTC整分边界，因此只要在
@@ -376,7 +383,8 @@ class QuoteCollector:
             }
             for venue, contract, bucket_time, bucket, covered in self.drain_minutes(now)
         ]
-        self._write(MarketQuoteSecond, seconds)
+        if STORE_SECOND_QUOTES:
+            self._write(MarketQuoteSecond, seconds)
         self._write(MarketQuoteMinute, minutes)
         return len(seconds), len(minutes)
 
@@ -482,7 +490,7 @@ class QuoteCollector:
                 self.reporter(f"{venue} 灌载失败：{type(error).__name__}: {error}")
             for contract in self.contracts:
                 try:
-                    partial = rebuild_from_seconds(venue, contract, engine=self.engine)
+                    partial = rebuild_from_redis(venue, contract)
                 except Exception as error:  # noqa: BLE001
                     self.reporter(f"{venue} {contract} 在途K线补齐失败：{error}")
                     continue

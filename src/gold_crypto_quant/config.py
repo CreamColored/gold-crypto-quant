@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     dingtalk_webhook: str | None = None
     dingtalk_secret: SecretStr | None = None
 
+    # 宏观数据发布前后暂停开仓。2026-09-04 非农那一分钟 BTC 振幅1155点、量放大12倍，
+    # 影子账户在数据发布30秒后开了两笔多单并当场止损——震荡策略在数据驱动的单边启动
+    # 里必然吃亏，而发布时刻是已知的：时间是确定的，形态是猜的。
+    # 设为0即关闭该功能。
+    macro_blackout_before_minutes: int = Field(default=15, ge=0, le=180)
+    macro_blackout_after_minutes: int = Field(default=15, ge=0, le=180)
+
     # Redis 承载策略进程要读的实时K线与现价快照；留空密码即视为免认证实例。
     # 采集服务写、量化服务读，两边共用同一份连接配置。
     redis_host: str = "127.0.0.1"

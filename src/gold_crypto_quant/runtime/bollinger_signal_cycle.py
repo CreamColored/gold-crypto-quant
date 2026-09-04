@@ -1,10 +1,13 @@
 """15分钟布林带轨道轮转的本地影子模拟周期。"""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
+from gold_crypto_quant.config import get_settings
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.runtime.bollinger_rotation_simulator import RotationPaperEvent
+from gold_crypto_quant.runtime.macro_blackout import active_blackout
 from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     run_multi_timeframe_paper_cycle,
 )
@@ -108,6 +111,16 @@ def run_bollinger_signal_cycle(
     paper_kwargs = {"state_path": state_path} if state_path is not None else {}
     # 交易开关只挡开仓：关闭后已有仓位的止损、减仓与止盈照常执行。
     switches = load_switches()
+    # 宏观数据发布窗口同样只挡开仓。挂在同一个 entry_allowed 上，因此自动覆盖所有
+    # 开仓路径（含对侧轨反手），也自动不影响止损、减仓与止盈。
+    settings = get_settings()
+    blackout = None
+    if settings.macro_blackout_before_minutes or settings.macro_blackout_after_minutes:
+        blackout = active_blackout(
+            datetime.now(UTC),
+            before=settings.macro_blackout_before_minutes,
+            after=settings.macro_blackout_after_minutes,
+        )
     # 在途K线只喂触轨判定，不参与指标计算——把未收线的那根算进布林带和MACD，
     # 轨道会在分钟内不停抖动，且与回测口径分叉。
     provisional_by_symbol = {
@@ -119,7 +132,9 @@ def run_bollinger_signal_cycle(
         bars_by_symbol,
         micro_bars_by_symbol=micro_bars_by_symbol,
         provisional_by_symbol=provisional_by_symbol,
-        entry_allowed=lambda symbol: resolve_entry_allowed(switches, venue, symbol),
+        entry_allowed=lambda symbol: (
+            blackout is None and resolve_entry_allowed(switches, venue, symbol)
+        ),
         **paper_kwargs,
     )
     entry_count = sum("模拟开仓" in item.title for item in paper.events)
@@ -136,7 +151,10 @@ def run_bollinger_signal_cycle(
         status="SHADOW_RUNNING" if paper.status == "RUNNING" else paper.status,
         new_signal_count=entry_count,
         order_count=0,
-        reason=f"{paper.reason}；当前选择：{active_status}",
+        reason=(
+            f"{paper.reason}；当前选择：{active_status}"
+            + (f"；宏观静默：{blackout.name}期间暂停开仓" if blackout else "")
+        ),
         paper_status=paper.status,
         paper_equity=paper.equity,
         paper_events=paper.events,

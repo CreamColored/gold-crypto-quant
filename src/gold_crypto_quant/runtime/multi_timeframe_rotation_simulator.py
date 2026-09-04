@@ -358,6 +358,35 @@ def _macd_frame(bars: pd.DataFrame) -> tuple:
     return close.to_numpy(), dif.to_numpy(), ((dif - dea) * 2).to_numpy()
 
 
+# 反手开仓的额外过滤钩子。默认 None＝不过滤，线上行为与未引入该钩子时完全一致；
+# 只有回测显式赋值时才生效，用来在不改动线上策略的前提下试验规则。
+# 签名：(symbol, interval, new_side, moment, bars) -> 是否允许反手
+REVERSAL_FILTER = None
+
+
+def current_histogram_run(bars: pd.DataFrame) -> tuple[int, int]:
+    """当前这一组MACD柱体的方向和长度。
+
+    返回 (方向, 根数)：方向 +1 为红柱（柱值为正）、-1 为绿柱，根数是连续同号的
+    柱子个数。刚变色时根数为1。数据不足时返回 (0, 0)。
+    """
+    if len(bars) < STRUCTURE_MACD_SLOW * 2:
+        return (0, 0)
+    _close, _dif, histogram = _macd_frame(bars.tail(STRUCTURE_MACD_HISTORY))
+    if len(histogram) == 0:
+        return (0, 0)
+    sign = 1 if histogram[-1] > 0 else -1 if histogram[-1] < 0 else 0
+    if sign == 0:
+        return (0, 0)
+    run = 0
+    for value in reversed(list(histogram)):
+        if (value > 0) == (sign > 0) and value != 0:
+            run += 1
+        else:
+            break
+    return (sign, run)
+
+
 def _histogram_groups(histogram, *, positive: bool) -> list[tuple[int, int]]:
     """把MACD柱按符号切成连续的红柱区或绿柱区，返回每段的[起,止]下标。"""
     groups: list[tuple[int, int]] = []
@@ -1375,8 +1404,16 @@ def run_multi_timeframe_paper_cycle(
                                 and not state.permanent_fuse
                             )
                             new_side = "SHORT" if old_side == "LONG" else "LONG"
+                            reversal_allowed = REVERSAL_FILTER is None or REVERSAL_FILTER(
+                                symbol,
+                                interval,
+                                new_side,
+                                minute_open_time,
+                                bars_by_symbol[symbol][interval],
+                            )
                             if (
                                 box_valid
+                                and reversal_allowed
                                 and switch_allows_entry(symbol)
                                 and not structure_blocks_entry(
                                     symbol, interval, new_side, minute_open_time
