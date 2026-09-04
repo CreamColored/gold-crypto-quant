@@ -80,6 +80,30 @@ button { cursor: pointer; }
 .stream-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: #30d158; }
 .stream-dot.down { background: #ff453a; }
 
+/* iOS 风格开关：轨道51×31、圆钮27，与系统设置一致。
+   复选框本身只是隐藏而非移除，键盘Tab与读屏仍然可用。 */
+.ios-switch { display: inline-flex; flex: none; }
+.ios-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.ios-track {
+  width: 51px; height: 31px; border-radius: 31px; background: #e9e9eb;
+  position: relative; display: inline-block; flex: none;
+  transition: background-color .25s ease;
+}
+.ios-knob {
+  position: absolute; top: 2px; left: 2px; width: 27px; height: 27px;
+  border-radius: 50%; background: #fff;
+  box-shadow: 0 3px 8px rgba(0,0,0,.15), 0 1px 1px rgba(0,0,0,.16);
+  transition: transform .25s cubic-bezier(.4,.2,.2,1);
+}
+.ios-switch input:checked + .ios-track { background: #34c759; }
+.ios-switch input:checked + .ios-track .ios-knob { transform: translateX(20px); }
+.ios-switch input:focus-visible + .ios-track { box-shadow: 0 0 0 4px rgba(0,113,227,.35); }
+.ios-switch input:disabled + .ios-track { opacity: .45; }
+@media (prefers-color-scheme: dark) {
+  .ios-track { background: #39393d; }
+  .ios-knob { background: #fff; }
+}
+
 /* 交易开关：层级用缩进表达，关闭态整行变灰以便一眼扫出哪些被禁用。 */
 .switch-list { padding: 0 20px 8px; }
 .switch-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 0.5px solid var(--border); }

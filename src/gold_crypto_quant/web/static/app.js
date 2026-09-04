@@ -263,12 +263,13 @@ function renderSwitches(view){
     const state = row.effective ? "允许开仓"
       : row.enabled ? "被上级关闭" : "禁止开仓";
     return `<div class="switch-row level-${row.level} ${blocked ? "off" : ""}">
-      <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;">
-        <input type="checkbox" data-scope="${esc(row.scope_key)}" ${row.enabled ? "checked" : ""}
-               style="width:18px;height:18px;cursor:pointer;">
-        <span class="switch-label">${esc(row.label)}<small>${esc(row.sub)}</small></span>
-      </label>
+      <span class="switch-label">${esc(row.label)}<small>${esc(row.sub)}</small></span>
       <span class="switch-state ${blocked ? "blocked" : ""}">${state}</span>
+      <label class="ios-switch" title="${esc(row.label)}">
+        <input type="checkbox" data-scope="${esc(row.scope_key)}" ${row.enabled ? "checked" : ""}
+               aria-label="${esc(row.label)} 开仓开关">
+        <span class="ios-track"><span class="ios-knob"></span></span>
+      </label>
     </div>`;
   }).join("");
   list.querySelectorAll("input[type=checkbox]").forEach(box => {
