@@ -7,18 +7,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """从默认值、``.env`` 与 ``.env.local`` 加载配置。
+    """从默认值和本地 ``.env`` 加载配置。
 
-    优先级：环境变量 > ``.env.local`` > ``.env`` > 代码默认值。
-
-    ``.env`` 在本仓库里是被 Git 跟踪的（私有仓库，历史凭据不轮换）。新增的密码优先
-    放 ``.env.local``——它在 ``.gitignore`` 里，密码不会进版本历史。已在库里的旧凭据
-    保持原位，把它们挪走并不能把历史里的记录抹掉，徒增改动面。
+    环境变量优先于代码默认值。``.env`` 在本仓库里是被 Git 跟踪的——私有仓库，凭据
+    集中在这一个文件里，不额外分层。
     """
 
-    # 同名键以后一个文件为准，因此 .env.local 覆盖 .env。
+    # Pydantic Settings 会自动读取项目根目录的 .env，并忽略暂未使用的扩展字段。
     model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"),
+        env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
