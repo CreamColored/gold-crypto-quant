@@ -1148,7 +1148,7 @@ def main() -> None:
             reporter=_runtime_log,
             log_every_cycle=args.log_every_cycle,
         )
-        _runtime_log("Gate/币安实盘公共行情七天对照启动；真实交易始终关闭")
+        _runtime_log("实盘公共行情对照启动；真实交易始终关闭")
         with (
             SingleInstanceLock(Path(".runtime/public-market-comparison.lock")),
             install_shutdown_signal_handlers(comparison_stop),

@@ -432,7 +432,11 @@ class PublicMarketComparisonRunner:
         completed_cycles = 0
         # 启停不再推送邮件和钉钉：重启是日常操作，每次都推会让真正的异常淹在里面。
         # 日志仍然留痕，行情中断、单轮超时、Redis降级这些异常告警照常发。
-        self.reporter("量化服务启动：Gate与币安实盘公共行情，不需要API密钥")
+        venues = "、".join(v.replace("_LIVE_PUBLIC", "") for v in PUBLIC_COMPARISON_VENUES)
+        symbols = "、".join(s.replace("_USDT", "") for s in PUBLIC_COMPARISON_CONTRACTS)
+        self.reporter(
+            f"量化服务启动：{venues} 实盘公共行情，品种 {symbols}，不需要API密钥"
+        )
         while not self.stop_event.is_set() and completed_cycles < self.max_cycles:
             cycle_started = datetime.now(UTC)
             # 每秒都跑：在途K线每秒变一次，触轨的停留确认要靠逐秒复查才能计时。

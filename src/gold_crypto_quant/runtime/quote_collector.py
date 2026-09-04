@@ -1,4 +1,6 @@
-"""通过 WebSocket 采集 Gate 与币安永续盘口，按秒和按分钟聚合入库。
+"""通过 WebSocket 采集永续盘口，按秒和按分钟聚合入库。
+
+启用哪些交易所与品种由 .env 的 ACTIVE_VENUES / ACTIVE_SYMBOLS 决定。
 
 为什么只存聚合而不存每一帧：盘口每秒推上千帧（实测币安BTC约1424帧/秒），
 三品种两交易所合计约2868帧/秒，原样入库是每天2.48亿行、13.85GB。而策略判定的是
@@ -553,7 +555,10 @@ class QuoteCollector:
                 # 某些平台或非主线程不支持；此时仍可由调用方显式停止。
                 pass
         self.load_instruments()
-        self.reporter(f"盘口采集启动：{'、'.join(self.contracts)}，Gate与币安各一条连接")
+        venues = "、".join(v.replace("_LIVE_PUBLIC", "") for v in QUOTE_VENUES)
+        self.reporter(
+            f"盘口采集启动：{'、'.join(self.contracts)}；交易所 {venues}"
+        )
         stack = ExitStack()
         self._gate_client = stack.enter_context(GatePublicClient())
         self._binance_client = stack.enter_context(BinancePublicClient())
