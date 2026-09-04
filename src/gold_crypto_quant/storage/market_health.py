@@ -44,7 +44,11 @@ def refresh_market_health(
                 MarketBar.interval_code == interval,
                 MarketBar.is_closed.is_(True),
             )
-            .order_by(MarketBar.close_time.desc())
+            # 按 open_time 排而不是 close_time：索引是
+            # (instrument_id, interval_code, open_time)，按 close_time 排会退化成
+            # filesort，每次排三千多行。同一周期内 close_time = open_time + 周期长度，
+            # 严格同序，取到的是同一根K线。
+            .order_by(MarketBar.open_time.desc())
             .limit(1)
         ).scalar_one_or_none()
         aware_latest_close = latest_close.replace(tzinfo=UTC) if latest_close is not None else None
