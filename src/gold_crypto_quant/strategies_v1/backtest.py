@@ -66,15 +66,31 @@ class BacktestResult:
         }
 
 
-def _aligned_index(driver: pd.DatetimeIndex, other: pd.DatetimeIndex) -> np.ndarray:
-    """对 driver 的每个时点，给出 other 中 <= 该时点的最后一个下标（+1 作切片上界）。
+INTERVAL_DURATION = {
+    "1m": pd.Timedelta(minutes=1),
+    "5m": pd.Timedelta(minutes=5),
+    "15m": pd.Timedelta(minutes=15),
+    "30m": pd.Timedelta(minutes=30),
+    "1h": pd.Timedelta(hours=1),
+}
 
-    大周期那一根必须已经收线才能用。open_time <= 当前 open_time 的最后一根，
-    其收线时间可能还在未来——但策略只读它的 open/high/low/close，而回测里
-    driver 的当前根也是刚收线的，两者同属"当下可见"，不构成未来函数。
-    严格起见这里再退一格：只交出 open_time 严格早于当前时点的大周期根。
+
+def _aligned_index(
+    driver: pd.DatetimeIndex, other: pd.DatetimeIndex, interval: str
+) -> np.ndarray:
+    """对 driver 的每个时点，给出 other 中**已经收线**的最后一根的切片上界。
+
+    收线时间 = open_time + 周期长度。判据必须是收线时间 <= 当前时刻，
+    不能是 open_time <= 当前时刻——驱动周期比结构周期小的时候，
+    后者会把一根还在进行中的大周期K线交给策略，那是未来函数：
+    5m 的 10:05 会拿到 10:00 那根 15m，而它要到 10:15 才收线。
+
+    等周期时两者等价（10:00 的 15m 在 10:00 这一步不会被自己看到），
+    所以这个修正只在跨周期时才改变行为，但不改就是错的。
     """
-    return np.searchsorted(other.to_numpy(), driver.to_numpy(), side="left")
+    duration = INTERVAL_DURATION[interval]
+    close_times = (other + duration).to_numpy()
+    return np.searchsorted(close_times, driver.to_numpy(), side="right")
 
 
 def run_backtest(
@@ -96,7 +112,8 @@ def run_backtest(
     )
     others = {name: frame for name, frame in bars.items() if name != driver_interval}
     cuts = {
-        name: _aligned_index(driver.index, frame.index) for name, frame in others.items()
+        name: _aligned_index(driver.index, frame.index, name)
+        for name, frame in others.items()
     }
 
     for step in range(warmup, len(driver)):

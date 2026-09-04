@@ -3,8 +3,8 @@
 取代原来的 Gate/币安双交易所对照——对照轴从"交易所"换成了"策略"：
 同一份 Gate 行情喂给两个策略，各自独立账户，看谁做得好。
 
-节奏：策略按已收线 K 线决策，最小驱动周期是 15m，所以没必要每秒轮询。
-默认 10 秒查一次游标，有新收线 K 线才真正跑策略。
+节奏：策略按已收线 K 线决策。执行周期最小可到 1m，所以默认 5 秒查一次游标，
+有新收线 K 线才真正跑策略——比 V5.8 的 1 秒轮询省，又不会漏掉 1m 的收线。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from gold_crypto_quant.storage.bar_source import check_health, load_bars
 from gold_crypto_quant.strategies_v1 import live as live_module
 from gold_crypto_quant.strategies_v1.params import load_config
 
-INTERVALS = ("15m", "30m", "1h")
+INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 DEFAULT_SYMBOLS = ("BTC_USDT", "ETH_USDT")
 
 
@@ -45,7 +45,7 @@ class StrategyComparisonRunner:
         *,
         symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
         venue: str = GATE_LIVE_VENUE,
-        poll_seconds: float = 10.0,
+        poll_seconds: float = 5.0,
         bar_limit: int = 400,
         log_every_cycle: bool = False,
     ) -> None:
@@ -83,7 +83,8 @@ class StrategyComparisonRunner:
                 )
                 for interval in INTERVALS
             }
-            if any(frame is None or frame.empty for frame in bars.values()):
+            bars = {k: v for k, v in bars.items() if v is not None and not v.empty}
+            if not bars:
                 continue
             for entry in (self.range_live, self.trend_live):
                 if blackout is not None and not entry.account.positions.get(symbol):
@@ -139,7 +140,7 @@ class StrategyComparisonRunner:
 def run_strategy_comparison(
     *,
     symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
-    poll_seconds: float = 10.0,
+    poll_seconds: float = 5.0,
     max_cycles: int | None = None,
     log_every_cycle: bool = False,
 ) -> None:

@@ -33,7 +33,8 @@ class RangeStrategyV1:
 
     def __init__(self, params: RangeParams | None = None) -> None:
         self.params = params or RangeParams()
-        self.entry_interval = "15m"
+        self.structure_interval = self.params.structure_interval
+        self.execution_interval = self.params.execution_interval
         # 最近一次识别出的箱体，供 Web 展示当前判定；不参与决策。
         self.last_box: dict[str, Box | None] = {}
         self.last_reason: dict[str, str] = {}
@@ -41,12 +42,18 @@ class RangeStrategyV1:
     # ------------------------------------------------------------------
 
     def on_bar(self, ctx: BarContext) -> list[Intent]:
-        bars = ctx.bars.get(self.entry_interval)
-        if bars is None or len(bars) < self.params.lookback_bars // 2:
-            return []
         p = self.params
+        # 箱体画在结构周期上（L8R4：周期越大骗线越少）；
+        # 触碰与成交价走执行周期（L12R4：到更小周期找精确开仓）。
+        structure = ctx.bars.get(self.structure_interval)
+        execution = ctx.bars.get(self.execution_interval)
+        if structure is None or execution is None or execution.empty:
+            return []
+        if len(structure) < max(40, p.lookback_bars // 4):
+            return []
+
         box = detect_box(
-            bars,
+            structure,
             lookback=p.lookback_bars,
             swing_window=p.swing_window,
             tolerance=p.touch_tolerance,
@@ -60,40 +67,37 @@ class RangeStrategyV1:
             self.last_reason[ctx.symbol] = "无合格箱体"
             return []
 
-        bar = bars.iloc[-1]
-        close = float(bar["close"])
-        open_ = float(bar["open"])
-        body_high, body_low = max(open_, close), min(open_, close)
-
         # ---- 突破判定（L8R10/R11）：实体收盘出沿 + 放量 ----
-        broke_up = body_low > box.upper if p.breakout_body_close else close > box.upper
-        broke_down = body_high < box.lower if p.breakout_body_close else close < box.lower
+        # 必须用结构周期最后一根**已收线**的K线。执行周期的一根 5m 实体出沿
+        # 不构成 L8R10 的"有效突破"，那正是 L8R14 第一类假突破的样子。
+        anchor = structure.iloc[-1]
+        anchor_open, anchor_close = float(anchor["open"]), float(anchor["close"])
+        body_high, body_low = max(anchor_open, anchor_close), min(anchor_open, anchor_close)
+        broke_up = body_low > box.upper if p.breakout_body_close else anchor_close > box.upper
+        broke_down = body_high < box.lower if p.breakout_body_close else anchor_close < box.lower
         if broke_up or broke_down:
-            ratio = volume_ratio(bars, span=1, baseline=20)
+            ratio = volume_ratio(structure, span=1, baseline=20)
             confirmed = ratio >= p.breakout_volume_ratio
             self.last_reason[ctx.symbol] = (
                 f"箱体被{'向上' if broke_up else '向下'}突破"
                 f"（量比{ratio:.2f}{'，确认' if confirmed else '，未放量'}）"
             )
-            # L8R17：入场后实体有效收回箱外，无条件离场。放不放量都不再持有——
-            # 判断依据已经不成立了，"等确认"只会把小亏拖成大亏。
             if ctx.position is not None and p.exit_on_breakout:
                 return [CloseIntent(1.0, "箱体失效：实体收盘出沿")]
             return []
 
-        # ---- 已有仓位：箱体仍有效就交给引擎按固定止盈/止损处理 ----
         if ctx.position is not None:
             self.last_reason[ctx.symbol] = "持仓中，箱体有效"
             return []
 
-        # ---- 入场（L8R6/R7）：只在沿附近做，箱体中部不做（L8R8）----
-        zone = box.height * p.entry_zone
+        # ---- 入场：在执行周期上判触碰与拒绝，成交价用执行周期的收盘 ----
+        bar = execution.iloc[-1]
+        close = float(bar["close"])
         low, high = float(bar["low"]), float(bar["high"])
+        zone = box.height * p.entry_zone
 
         touched_lower = low <= box.lower + zone
         touched_upper = high >= box.upper - zone
-        # L8R6/R7 的"冲高乏力""止跌企稳"：要求收盘已经回到沿内侧，
-        # 否则只是插了一下就继续走，不是拒绝。
         rejected_lower = close > box.lower if p.require_edge_rejection else True
         rejected_upper = close < box.upper if p.require_edge_rejection else True
 
@@ -109,9 +113,7 @@ class RangeStrategyV1:
             self.last_reason[ctx.symbol] = f"上沿{box.upper:.2f}受阻做空"
             return [OpenIntent("SHORT", stop, target, f"箱体上沿做空（触碰{box.upper_touches}次）")]
 
-        self.last_reason[ctx.symbol] = (
-            f"箱体{box.lower:.2f}–{box.upper:.2f}，价格在中部等待"
-        )
+        self.last_reason[ctx.symbol] = f"箱体{box.lower:.2f}–{box.upper:.2f}，价格在中部等待"
         return []
 
     # ------------------------------------------------------------------

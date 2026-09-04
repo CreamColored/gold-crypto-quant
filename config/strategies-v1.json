@@ -1,5 +1,7 @@
 {
   "range": {
+    "structure_interval": "15m",
+    "execution_interval": "5m",
     "lookback_bars": 200,
     "swing_window": 2,
     "touch_tolerance": 0.0015,
@@ -21,6 +23,7 @@
   "trend": {
     "direction_interval": "1h",
     "entry_interval": "15m",
+    "execution_interval": "5m",
     "require_direction_agreement": true,
     "min_waves": 3,
     "min_wave_bars": 2,

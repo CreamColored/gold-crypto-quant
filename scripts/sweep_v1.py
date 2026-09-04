@@ -35,9 +35,12 @@ from gold_crypto_quant.strategies_v1.range_v1 import RangeStrategyV1  # noqa: E4
 from gold_crypto_quant.strategies_v1.trend_v1 import TrendStrategyV1  # noqa: E402
 
 VENUE = "GATE_LIVE_PUBLIC"
-INTERVALS = ("15m", "30m", "1h")
+INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 
 RANGE_GRID: dict[str, list] = {
+    # 结构周期画箱体、执行周期给成交价。实测 15m 结构 + 5m 执行比
+    # 15m 结构 + 15m 执行在 30 天窗口上好 589U，差别全在入场滑价上。
+    "intervals": [("15m", "5m"), ("15m", "15m"), ("30m", "5m"), ("30m", "15m"), ("5m", "5m")],
     "touch_tolerance": [0.0010, 0.0015, 0.0025, 0.0040],
     "min_touches": [2, 3],
     "entry_zone": [0.10, 0.15, 0.25],
@@ -48,7 +51,9 @@ RANGE_GRID: dict[str, list] = {
 TREND_GRID: dict[str, list] = {
     "min_waves": [2, 3],
     "min_wave_bars": [1, 2],
-    "intervals": [("1h", "15m"), ("30m", "15m"), ("1h", "30m")],
+    # (战略, 战术, 执行)
+    "intervals": [("1h", "15m", "5m"), ("1h", "15m", "15m"), ("30m", "15m", "5m"),
+                  ("1h", "30m", "5m")],
     "require_zero_axis": [True, False],
     "require_volume": [True, False],
     "pullback": [(0.20, 0.75), (0.10, 0.90), (0.30, 0.60)],
@@ -99,15 +104,20 @@ class Outcome:
 def _build(kind: str, combo: dict):
     """把一组扫描值变成参数对象；返回 (params, 驱动周期)。"""
     if kind == "range":
-        return RangeParams().replace(**combo), "15m"
+        changes = dict(combo)
+        structure, execution = changes.pop("intervals")
+        params = RangeParams().replace(
+            structure_interval=structure, execution_interval=execution, **changes
+        )
+        return params, execution
     changes = dict(combo)
-    direction, entry = changes.pop("intervals")
+    direction, entry, execution = changes.pop("intervals")
     low, high = changes.pop("pullback")
     params = TrendParams().replace(
-        direction_interval=direction, entry_interval=entry,
+        direction_interval=direction, entry_interval=entry, execution_interval=execution,
         pullback_min=low, pullback_max=high, **changes,
     )
-    return params, entry
+    return params, execution
 
 
 def _evaluate(job) -> Outcome:
@@ -119,8 +129,8 @@ def _evaluate(job) -> Outcome:
     worst = 0.0
     gains = drops = 0.0
     for symbol in symbols:
-        bars = _BARS[window_key][symbol]
-        if any(len(bars[i]) < 60 for i in INTERVALS):
+        bars = {k: v for k, v in _BARS[window_key][symbol].items() if len(v) >= 60}
+        if driver not in bars:
             continue
         result = run_backtest(
             factory(params), symbol=symbol, bars=bars, driver_interval=driver,

@@ -23,7 +23,7 @@ from gold_crypto_quant.strategies_v1.params import load_config  # noqa: E402
 from gold_crypto_quant.strategies_v1.range_v1 import RangeStrategyV1  # noqa: E402
 from gold_crypto_quant.strategies_v1.trend_v1 import TrendStrategyV1  # noqa: E402
 
-INTERVALS = ("15m", "30m", "1h")
+INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 _ENGINE = create_engine(get_settings().database_url, pool_pre_ping=True)
 
 
@@ -71,19 +71,21 @@ def main() -> int:
             interval: load_bars(symbol, interval, args.venue, start, end)
             for interval in INTERVALS
         }
-        missing = [k for k, v in bars.items() if v.empty]
-        if missing:
-            print(f"  {symbol} 缺少周期 {missing}，跳过")
-            continue
+        bars = {k: v for k, v in bars.items() if not v.empty}
         counts = "  ".join(f"{k}:{len(v)}根" for k, v in bars.items())
         print(f"  {symbol}  {counts}")
-        for strategy, risk in (
-            (RangeStrategyV1(config.range_params), config.range_params.risk_per_trade),
-            (TrendStrategyV1(config.trend_params), config.trend_params.risk_per_trade),
+        for strategy, params in (
+            (RangeStrategyV1(config.range_params), config.range_params),
+            (TrendStrategyV1(config.trend_params), config.trend_params),
         ):
+            driver = params.execution_interval
+            if driver not in bars:
+                print(f"    {strategy.name}：缺少执行周期 {driver} 的数据，跳过")
+                continue
             result = run_backtest(
-                strategy, symbol=symbol, bars=bars, driver_interval="15m",
-                risk_per_trade=risk, initial_equity=args.equity, warmup=args.warmup,
+                strategy, symbol=symbol, bars=bars, driver_interval=driver,
+                risk_per_trade=params.risk_per_trade, initial_equity=args.equity,
+                warmup=args.warmup,
             )
             rows.append(result)
             print(f"    {result.summary_line()}")

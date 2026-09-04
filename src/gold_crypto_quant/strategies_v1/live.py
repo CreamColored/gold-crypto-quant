@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from gold_crypto_quant.strategies_v1.backtest import INTERVAL_DURATION
 from gold_crypto_quant.strategies_v1.engine import (
     Account,
     BarContext,
@@ -62,9 +63,10 @@ def build(config: StrategyConfig | None = None) -> tuple[LiveStrategy, LiveStrat
     config = config or load_config()
     pair = []
     for key, venue, path, factory, params, driver in (
-        ("range", RANGE_VENUE, RANGE_STATE_PATH, RangeStrategyV1, config.range_params, "15m"),
+        ("range", RANGE_VENUE, RANGE_STATE_PATH, RangeStrategyV1, config.range_params,
+         config.range_params.execution_interval),
         ("trend", TREND_VENUE, TREND_STATE_PATH, TrendStrategyV1, config.trend_params,
-         config.trend_params.entry_interval),
+         config.trend_params.execution_interval),
     ):
         strategy = factory(params)
         engine = Engine(
@@ -191,7 +193,8 @@ def advance(
         for name, frame in bars.items():
             if name == live.driver_interval or frame.empty:
                 continue
-            upper = int(frame.index.searchsorted(stamp, side="left"))
+            # 同 backtest._aligned_index：判据是收线时间，不是 open_time。
+            upper = int((frame.index + INTERVAL_DURATION[name]).searchsorted(stamp, side="right"))
             if upper > 0:
                 view[name] = frame.iloc[:upper]
         ctx = BarContext(

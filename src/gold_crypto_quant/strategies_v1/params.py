@@ -50,6 +50,18 @@ class RangeParams(_ParamBase):
     不是布林带轨道。水平线固定不动，所以止盈目标不会像布林带那样一边涨一边跑。
     """
 
+    # ---- 周期分工（L12R4）----
+    structure_interval: str = "15m"
+    """在哪个周期上画箱体。L8R4：周期越大骗线越少、交易价值越高。"""
+
+    execution_interval: str = "5m"
+    """在哪个周期上找精确入场点。L12R4："再到15分钟或5分钟寻找精确开仓"。
+
+    等于 structure_interval 时退回到"收盘价入场"，实测平均比触碰价差 0.19%，
+    相当于每笔多付 20% 的风险预算。可选 1m/5m/15m/30m/1h，但回测深度受限于
+    Gate 每周期 10000 根：1m 只有 6.9 天、5m 34.7 天、15m 104 天。
+    """
+
     # ---- 箱体识别 ----
     lookback_bars: int = 200
     """回看多少根 K 线找箱体。"""
@@ -107,6 +119,12 @@ class RangeParams(_ParamBase):
     """同时最多持有几笔。"""
 
     def __post_init__(self) -> None:
+        valid = ("1m", "5m", "15m", "30m", "1h")
+        if self.structure_interval not in valid or self.execution_interval not in valid:
+            raise ValueError(f"周期必须取自 {valid}")
+        order = {name: index for index, name in enumerate(valid)}
+        if order[self.execution_interval] > order[self.structure_interval]:
+            raise ValueError("执行周期不能大于结构周期")
         if self.lookback_bars < 20:
             raise ValueError("lookback_bars 至少 20 根才够找出两次触碰")
         if self.swing_window < 1:
@@ -144,7 +162,13 @@ class TrendParams(_ParamBase):
     """战略周期，只定方向不给买卖点。L12R2 用 4h，系统目前最大只有 1h。"""
 
     entry_interval: str = "15m"
-    """执行周期，在方向约束下找精确入场。L12R4。"""
+    """战术周期，识别回调形态并锁定入场区域。L12R3。"""
+
+    execution_interval: str = "5m"
+    """执行周期，在锁定的区域内给出精确开仓价。L12R4。
+
+    等于 entry_interval 时退回到"收盘价入场"。回测深度受限于 Gate 每周期
+    10000 根：1m 6.9 天、5m 34.7 天、15m 104 天。"""
 
     require_direction_agreement: bool = True
     """是否强制小周期服从大周期。L12R9："只顺大趋势单向交易"。"""
@@ -203,12 +227,15 @@ class TrendParams(_ParamBase):
     max_positions: int = 1
 
     def __post_init__(self) -> None:
-        valid = ("5m", "15m", "30m", "1h")
-        if self.direction_interval not in valid or self.entry_interval not in valid:
-            raise ValueError(f"周期必须取自 {valid}")
+        valid = ("1m", "5m", "15m", "30m", "1h")
+        for name in (self.direction_interval, self.entry_interval, self.execution_interval):
+            if name not in valid:
+                raise ValueError(f"周期必须取自 {valid}")
         order = {name: index for index, name in enumerate(valid)}
         if order[self.entry_interval] >= order[self.direction_interval]:
-            raise ValueError("执行周期必须小于战略周期（L12R2/R4）")
+            raise ValueError("战术周期必须小于战略周期（L12R2/R3）")
+        if order[self.execution_interval] > order[self.entry_interval]:
+            raise ValueError("执行周期不能大于战术周期（L12R4）")
         if self.min_waves < 2:
             raise ValueError("min_waves 至少为 2 才谈得上比较高低点")
         if self.min_wave_bars < 1:

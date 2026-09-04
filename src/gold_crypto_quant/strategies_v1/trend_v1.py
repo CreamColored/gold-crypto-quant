@@ -52,7 +52,11 @@ class TrendStrategyV1:
         p = self.params
         entry_bars = ctx.bars.get(p.entry_interval)
         direction_bars = ctx.bars.get(p.direction_interval)
-        if entry_bars is None or direction_bars is None:
+        # 执行周期只用来给成交价和跟踪止损的 ATR，形态判定一律在战术周期上做。
+        exec_bars = ctx.bars.get(p.execution_interval)
+        if entry_bars is None or direction_bars is None or exec_bars is None:
+            return []
+        if exec_bars.empty:
             return []
         # 门槛按判定实际需要推导，不写死。MACD 要 26 根才稳定，浪形判定再要
         # min_waves × min_wave_bars 根。写死 60 会让 7 天窗口里 1h 的前 36% 不可用。
@@ -70,7 +74,7 @@ class TrendStrategyV1:
         self.last_direction[ctx.symbol] = verdict.direction
 
         if ctx.position is not None:
-            return self._manage(ctx, entry_bars, verdict.direction)
+            return self._manage(ctx, entry_bars, exec_bars, verdict.direction)
 
         if p.require_direction_agreement and verdict.direction == 0:
             self.last_reason[ctx.symbol] = f"{p.direction_interval}无趋势：{verdict.reason}"
@@ -142,10 +146,12 @@ class TrendStrategyV1:
                 return []
 
         # ---- 下单：止损放回调极值之外，留 ATR 缓冲（L13R6/R8）----
+        # ATR 取战术周期：执行周期的 ATR 小一个量级，拿它做缓冲等于止损贴着价格放，
+        # 一根正常的回踩就会被扫掉。L13R8 要的是"关键位下方留缓冲"，不是最小缓冲。
         atr = average_true_range(entry_bars, period=p.atr_period)
         if atr <= 0:
             return []
-        price = float(entry_bars["close"].iloc[-1])
+        price = float(exec_bars["close"].iloc[-1])
         buffer = atr * p.stop_atr_multiple
         stop = pullback_extreme - buffer if direction > 0 else pullback_extreme + buffer
         if (direction > 0 and stop >= price) or (direction < 0 and stop <= price):
@@ -170,7 +176,10 @@ class TrendStrategyV1:
 
     # ------------------------------------------------------------------
 
-    def _manage(self, ctx: BarContext, entry_bars: pd.DataFrame, direction: int) -> list[Intent]:
+    def _manage(
+        self, ctx: BarContext, entry_bars: pd.DataFrame,
+        exec_bars: pd.DataFrame, direction: int,
+    ) -> list[Intent]:
         """持仓管理：趋势破坏离场 + 跟踪止损。"""
         p = self.params
         position = ctx.position
@@ -185,7 +194,7 @@ class TrendStrategyV1:
         risk = position.risk_distance
         if risk <= 0:
             return []
-        price = float(entry_bars["close"].iloc[-1])
+        price = float(exec_bars["close"].iloc[-1])
         gain_r = (price - position.entry_price) * held / risk
         if gain_r < p.trail_start_r:
             return []
