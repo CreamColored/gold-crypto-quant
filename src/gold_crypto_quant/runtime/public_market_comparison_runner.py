@@ -223,15 +223,14 @@ class PublicMarketComparisonRunner:
         started = datetime.now(UTC)
         result: ComparisonFeedResult | None = None
         try:
-            # 行情健康表是按收线K线判定的，每秒重刷一遍等于每秒30次写入却得不到
-            # 任何新信息；只在真的有新收线时刷。
-            if bars_changed:
-                self._refresh_health(venue)
+            # 健康检查交给 run_bollinger_signal_cycle 内部去做——这里原来还有一份
+            # 独立的 _refresh_health，两处做的是同一件事，等于每轮重复了一遍。
             summary = run_bollinger_signal_cycle(
                 symbols=PUBLIC_COMPARISON_CONTRACTS,
                 venue=venue,
                 state_path=state_path,
                 source_health=health,
+                refresh_health=bars_changed,
             )
             result = ComparisonFeedResult(label, health.source, summary)
             # 保存该交易所独立的影子权益与交易事件，Web后台只读这些监管数据。

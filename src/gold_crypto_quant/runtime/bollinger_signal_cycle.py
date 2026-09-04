@@ -33,6 +33,15 @@ class BollingerSignalCycleSummary:
     paper_holdings: str = ""
 
 
+# 各交易所上一轮的行情健康判定；没有新收线K线时复用。
+_HEALTH_CACHE: dict[str, dict] = {}
+
+
+def reset_health_cache() -> None:
+    """清空健康判定缓存；测试与切换数据源时调用。"""
+    _HEALTH_CACHE.clear()
+
+
 def run_bollinger_signal_cycle(
     *,
     symbols: tuple[str, ...] = ("BTC_USDT", "ETH_USDT"),
@@ -41,6 +50,7 @@ def run_bollinger_signal_cycle(
     venue: str = GATE_TESTNET_VENUE,
     state_path: Path | None = None,
     source_health: SourceHealth | None = None,
+    refresh_health: bool = True,
 ) -> BollingerSignalCycleSummary:
     """按周期优先级运行BTC/ETH共享资金、全局单持仓影子账户。
 
@@ -48,11 +58,17 @@ def run_bollinger_signal_cycle(
     脚本和测试直接调用。
     """
     source_health = source_health or check_health(venue)
-    health_by_stream = {
-        (symbol, interval): refresh_market_health(symbol, interval, venue=venue)
-        for symbol in symbols
-        for interval in ("1m", "5m", "15m", "30m", "1h")
-    }
+    # 健康判定的输入是"最后一根收线K线的时间"，一分钟才变一次；而策略每秒都跑。
+    # 每轮重算要发75条SQL（15个流 × 查品种、查末根、查旧状态、写新状态、提交），
+    # 两个交易所每秒就是150条——实测占了数据库全部负载的九成以上。
+    # 没有新收线时直接复用上一轮的判定。
+    if refresh_health or venue not in _HEALTH_CACHE:
+        _HEALTH_CACHE[venue] = {
+            (symbol, interval): refresh_market_health(symbol, interval, venue=venue)
+            for symbol in symbols
+            for interval in ("1m", "5m", "15m", "30m", "1h")
+        }
+    health_by_stream = _HEALTH_CACHE[venue]
     unhealthy = [
         f"{symbol} {interval}：{health.reason}"
         for (symbol, interval), health in health_by_stream.items()
