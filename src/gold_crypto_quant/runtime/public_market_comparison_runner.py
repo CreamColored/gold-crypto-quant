@@ -1,5 +1,6 @@
 """Gate与币安实盘公共行情双影子账户七天对照服务。"""
 
+import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,8 +35,11 @@ PUBLIC_COMPARISON_VENUES = get_settings().enabled_venues(ALL_COMPARISON_VENUES)
 PUBLIC_COMPARISON_INTERVALS = ("1m", "5m", "15m", "30m", "1h")
 # 单轮超过这个秒数才算节奏丢失——策略按收线K线推进，跨过整根才会漏掉判定。
 CYCLE_OVERRUN_SECONDS = 30.0
-GATE_LIVE_STATE_PATH = Path(".runtime/bollinger-gate-live-paper-v5.json")
-BINANCE_LIVE_STATE_PATH = Path(".runtime/bollinger-binance-live-paper-v5.json")
+# 影子状态落在磁盘上，路径默认 .runtime。Mac 上跑测试环境时用 GCQ_STATE_DIR 指到
+# 别处，避免测试实例覆盖生产状态——web/data.py 也从这里取路径，改一处三个服务同步。
+STATE_DIR = Path(os.environ.get("GCQ_STATE_DIR") or ".runtime")
+GATE_LIVE_STATE_PATH = STATE_DIR / "bollinger-gate-live-paper-v5.json"
+BINANCE_LIVE_STATE_PATH = STATE_DIR / "bollinger-binance-live-paper-v5.json"
 # 单轮耗时超过轮询间隔时的重复告警间隔；持续超时按这个周期节流，不逐轮刷屏。
 CYCLE_OVERRUN_ALERT_COOLDOWN = timedelta(minutes=15)
 # 连续超时达到这个轮数才告警；偶发一轮变慢（网络抖动、交易所响应慢）不值得打扰。
