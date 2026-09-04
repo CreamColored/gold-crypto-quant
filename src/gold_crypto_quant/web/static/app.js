@@ -228,7 +228,36 @@ async function loadTrades(page=tradePage) {
 }
 
 function uptime(seconds){const d=Math.floor(seconds/86400),h=Math.floor(seconds%86400/3600),m=Math.floor(seconds%3600/60);return `${d}天 ${h}小时 ${m}分钟`;}
-async function loadSystem(){const data=await getJSON("/api/system");$("#system-cards").innerHTML=`<article class="metric-card"><span>整机CPU</span><strong>${data.cpu_percent.toFixed(1)}%</strong><small>当前短采样</small></article><article class="metric-card"><span>内存</span><strong>${data.memory_percent.toFixed(1)}%</strong><small>${data.memory_used_gib.toFixed(1)} / ${data.memory_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>数据盘</span><strong>${data.disk_percent.toFixed(1)}%</strong><small>${data.disk_used_gib.toFixed(1)} / ${data.disk_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>开机时长</span><strong>${uptime(data.uptime_seconds).split(" ")[0]}</strong><small>${uptime(data.uptime_seconds)}</small></article>`;$("#process-status").innerHTML=`<div><dt>量化服务</dt><dd class="${data.comparison_running?"positive":"negative"}">${data.comparison_running?"RUNNING":"STOPPED"}</dd></div><div><dt>量化服务PID</dt><dd>${data.comparison_pid||"—"}</dd></div><div><dt>Web监管PID</dt><dd>${data.web_pid}</dd></div><div><dt>主机</dt><dd>${esc(data.hostname)}</dd></div>`;renderCollector(data.quote_collector);}
+function renderReadiness(data){
+  const box=$("#entry-readiness"); if(!box) return;
+  if(!data||!data.accounts||!data.accounts.length){box.innerHTML='<p class="muted">暂无数据</p>';return;}
+  // 结论用颜色区分：可开仓是绿的，熔断是红的，其余是等待类的黄。
+  const tone=v=>v==="可开仓"?"ok":(v==="熔断"?"bad":(v==="持仓中"?"ok":"warn"));
+  let html="";
+  if(data.blackout) html+='<p class="readiness-note">宏观静默中：'+data.blackout+'</p>';
+  for(const a of data.accounts){
+    if(!a.available){html+='<div class="readiness-acct"><h3>'+a.label+'</h3><p class="muted">'+a.reason+'</p></div>';continue;}
+    html+='<div class="readiness-acct"><h3>'+a.label+' <span class="muted">权益 '+a.equity.toFixed(2)+'U</span></h3>';
+    for(const s of a.symbols){
+      const ivs=Object.keys(s.boxes||{});
+      const chips=ivs.map(function(i){
+        const on=s.boxes[i], blk=s.blocked[i];
+        const cls=blk?"chip blk":(on?"chip on":"chip");
+        const tip=blk?"止损封锁中":(on?"箱体已确认":"箱体未确认");
+        return '<span class="'+cls+'" title="'+tip+'">'+i+'</span>';
+      }).join("");
+      html+='<div class="readiness-row"><div class="readiness-head">'+
+        '<span class="sym">'+s.symbol.replace("_USDT","")+'</span>'+
+        '<span class="verdict '+tone(s.verdict)+'">'+s.verdict+'</span></div>'+
+        '<p class="readiness-why">'+s.reason+'</p>'+
+        '<div class="chips">'+chips+'</div></div>';
+    }
+    html+='</div>';
+  }
+  box.innerHTML=html;
+}
+
+async function loadSystem(){const data=await getJSON("/api/system");renderReadiness(data.entry_readiness);$("#system-cards").innerHTML=`<article class="metric-card"><span>整机CPU</span><strong>${data.cpu_percent.toFixed(1)}%</strong><small>当前短采样</small></article><article class="metric-card"><span>内存</span><strong>${data.memory_percent.toFixed(1)}%</strong><small>${data.memory_used_gib.toFixed(1)} / ${data.memory_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>数据盘</span><strong>${data.disk_percent.toFixed(1)}%</strong><small>${data.disk_used_gib.toFixed(1)} / ${data.disk_total_gib.toFixed(1)} GiB</small></article><article class="metric-card"><span>开机时长</span><strong>${uptime(data.uptime_seconds).split(" ")[0]}</strong><small>${uptime(data.uptime_seconds)}</small></article>`;$("#process-status").innerHTML=`<div><dt>量化服务</dt><dd class="${data.comparison_running?"positive":"negative"}">${data.comparison_running?"RUNNING":"STOPPED"}</dd></div><div><dt>量化服务PID</dt><dd>${data.comparison_pid||"—"}</dd></div><div><dt>Web监管PID</dt><dd>${data.web_pid}</dd></div><div><dt>主机</dt><dd>${esc(data.hostname)}</dd></div>`;renderCollector(data.quote_collector);}
 
 // 采集器健康只能在这里看：行情页的价格是浏览器直连交易所的，采集器停了那边照样跳动，
 // 而策略和回测用的正是采集器落库的数据。

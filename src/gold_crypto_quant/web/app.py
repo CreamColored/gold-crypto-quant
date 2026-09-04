@@ -23,6 +23,7 @@ from gold_crypto_quant.storage.web_admin import (
     validate_password_strength,
 )
 from gold_crypto_quant.web.data import (
+    build_entry_readiness,
     build_live_quotes,
     build_market_chart,
     build_overview,
@@ -335,6 +336,9 @@ def create_app(engine: Engine | None = None) -> FastAPI:
 
     @app.get("/api/system")
     def system_api(request: Request, _user=Depends(current_admin)):
-        return build_system_status(request.app.state.engine)
+        payload = build_system_status(request.app.state.engine)
+        # "为什么不开单"要和进程状态放在同一页，否则得翻状态文件才知道。
+        payload["entry_readiness"] = build_entry_readiness()
+        return payload
 
     return app

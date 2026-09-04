@@ -10,11 +10,15 @@ import psutil
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
+from gold_crypto_quant.config import get_settings
 from gold_crypto_quant.market_data.binance_history import BINANCE_LIVE_VENUE
 from gold_crypto_quant.market_data.gate_history import GATE_LIVE_VENUE
+from gold_crypto_quant.runtime.macro_blackout import active_blackout
 from gold_crypto_quant.runtime.public_market_comparison_runner import (
     BINANCE_LIVE_STATE_PATH,
     GATE_LIVE_STATE_PATH,
+    PUBLIC_COMPARISON_CONTRACTS,
+    PUBLIC_COMPARISON_VENUES,
 )
 from gold_crypto_quant.storage.market_bars import load_market_bars
 from gold_crypto_quant.storage.models import (
@@ -25,7 +29,12 @@ from gold_crypto_quant.storage.models import (
     ShadowTradeEvent,
     TradingAccount,
 )
-from gold_crypto_quant.storage.trading_switches import GLOBAL_SCOPE
+from gold_crypto_quant.storage.shadow_monitor import ACCOUNT_DEFINITIONS
+from gold_crypto_quant.storage.trading_switches import (
+    GLOBAL_SCOPE,
+    load_switches,
+    resolve_entry_allowed,
+)
 from gold_crypto_quant.strategy.bollinger_range import (
     build_rotation_box_context,
     parameters_for_same_timeframe,
@@ -598,4 +607,101 @@ def build_system_status(engine: Engine | None = None) -> dict[str, Any]:
         "live_trading": False,
         "order_submission": False,
         "quote_collector": build_quote_collector_health(engine) if engine is not None else None,
+    }
+
+
+# 状态文件路径直接用运行器导出的常量，避免两处各写一份路径而悄悄分叉。
+_STATE_FILES = {
+    GATE_LIVE_VENUE: GATE_LIVE_STATE_PATH,
+    BINANCE_LIVE_VENUE: BINANCE_LIVE_STATE_PATH,
+}
+
+
+def build_entry_readiness() -> dict[str, Any]:
+    """回答"此刻为什么不开仓"，而不是罗列一堆状态。
+
+    这个面板的由来：2026-09-04 非农那两笔止损之后，策略连续数小时没有开单。真实
+    原因是止损封锁尚未解除、四个周期都没有合格箱体——但这些只存在于状态文件里，
+    要翻 JSON 才看得到。"为什么不开单"应该是一眼能看到的东西。
+
+    每个品种给一句结论加一条理由，按拦截顺序取第一个成立的：账户级熔断 → 宏观
+    静默 → 交易开关 → 止损封锁 → 箱体未确认。顺序与策略里的实际判定一致，
+    否则页面会指向一个并非真正拦住它的原因。
+    """
+    now = datetime.now(UTC)
+    settings = get_settings()
+    try:
+        switches = load_switches()
+    except Exception:  # noqa: BLE001 - 页面不能因为查不到开关就打不开
+        switches = {}
+    blackout = None
+    if settings.macro_blackout_before_minutes or settings.macro_blackout_after_minutes:
+        try:
+            blackout = active_blackout(
+                now,
+                before=settings.macro_blackout_before_minutes,
+                after=settings.macro_blackout_after_minutes,
+            )
+        except Exception:  # noqa: BLE001
+            blackout = None
+
+    accounts: list[dict[str, Any]] = []
+    for venue in PUBLIC_COMPARISON_VENUES:
+        path = _STATE_FILES.get(venue)
+        label = ACCOUNT_DEFINITIONS.get(venue, {}).get("display_name", venue)
+        if path is None or not path.exists():
+            accounts.append({"venue": venue, "label": label, "available": False,
+                             "reason": "状态文件尚未生成"})
+            continue
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            accounts.append({"venue": venue, "label": label, "available": False,
+                             "reason": f"状态文件读取失败：{type(error).__name__}"})
+            continue
+
+        symbols: list[dict[str, Any]] = []
+        for symbol in PUBLIC_COMPARISON_CONTRACTS:
+            position = (state.get("positions") or {}).get(symbol) or {}
+            side = position.get("position_side") or ""
+            boxes = (state.get("box_active") or {}).get(symbol) or {}
+            blocked = (state.get("blocked_after_stop") or {}).get(symbol) or {}
+            # 拦截顺序必须和策略一致，否则页面指向的不是真正拦住它的那一条。
+            if state.get("permanent_fuse"):
+                verdict, why = "熔断", "策略累计回撤触发永久熔断"
+            elif state.get("daily_blocked"):
+                verdict, why = "熔断", "当日累计亏损触及上限"
+            elif blackout is not None:
+                verdict, why = "静默", f"{blackout.name}发布前后暂停开仓"
+            elif not resolve_entry_allowed(switches, venue, symbol):
+                verdict, why = "开关关闭", "交易配置里关掉了该品种或其上级开关"
+            elif side:
+                verdict, why = "持仓中", f"{side} 于 {position.get('active_interval') or '—'}"
+            elif (state.get("symbol_blocked_after_stop") or {}).get(symbol):
+                stopped = (state.get("symbol_stopped_interval") or {}).get(symbol) or "—"
+                verdict = "止损封锁"
+                why = f"{stopped} 止损后封锁全品种，需等某周期箱体重新确认才解除"
+            elif not any(boxes.values()):
+                verdict, why = "等待箱体", "四个周期都没有确认的震荡箱体"
+            else:
+                ready = [k for k, v in boxes.items() if v and not blocked.get(k)]
+                verdict = "可开仓" if ready else "等待箱体"
+                why = f"已确认周期：{'、'.join(ready)}" if ready else "确认的箱体都还在止损封锁中"
+            symbols.append({
+                "symbol": symbol, "verdict": verdict, "reason": why,
+                "position": side, "interval": position.get("active_interval") or "",
+                "boxes": {k: bool(v) for k, v in boxes.items()},
+                "blocked": {k: bool(v) for k, v in blocked.items()},
+            })
+        accounts.append({
+            "venue": venue, "label": label, "available": True,
+            "equity": float(state.get("equity", 0.0)),
+            "daily_blocked": bool(state.get("daily_blocked")),
+            "permanent_fuse": bool(state.get("permanent_fuse")),
+            "symbols": symbols,
+        })
+    return {
+        "generated_at": now.isoformat(),
+        "blackout": blackout.name if blackout else "",
+        "accounts": accounts,
     }

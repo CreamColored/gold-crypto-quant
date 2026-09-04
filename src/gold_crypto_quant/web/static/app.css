@@ -117,3 +117,31 @@ button { cursor: pointer; }
 .switch-label small { display: block; font-weight: 400; font-size: 12px; color: var(--secondary); }
 .switch-state { font-size: 12px; text-align: right; }
 .switch-state.blocked { color: #ff3b30; font-weight: 500; }
+
+/* 开仓就绪度：一眼看出"此刻能不能开仓、卡在哪一步"。 */
+.readiness-note{margin:0 20px 12px;padding:8px 12px;border-radius:8px;
+  background:var(--warn-soft,#fbefd9);color:var(--warn,#9a5f00);font-size:13px}
+.readiness-acct{padding:0 20px 12px}
+.readiness-acct h3{font-size:14px;margin:10px 0 8px;font-weight:600}
+.readiness-row{padding:10px 0;border-top:1px solid var(--line)}
+.readiness-head{display:flex;align-items:center;gap:10px}
+.readiness-head .sym{font-weight:600;font-size:14px;min-width:44px}
+.verdict{font-size:12px;padding:2px 9px;border-radius:999px;font-weight:500}
+.verdict.ok{background:#e6f0e7;color:#2f6b3f}
+.verdict.warn{background:#fbefd9;color:#9a5f00}
+.verdict.bad{background:#fbe8e6;color:#9d2f28}
+.readiness-why{margin:6px 0 8px;font-size:12.5px;color:var(--secondary,#666)}
+/* 周期小标：灰=未确认，绿=箱体已确认，红=止损封锁中 */
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);
+  color:var(--tertiary,#888);font-family:ui-monospace,monospace}
+.chip.on{background:#e6f0e7;border-color:#b6d5bd;color:#2f6b3f}
+.chip.blk{background:#fbe8e6;border-color:#e6bdb8;color:#9d2f28}
+@media (prefers-color-scheme:dark){
+  .verdict.ok{background:#1b2c1f;color:#8dc39a}
+  .verdict.warn{background:#33280f;color:#d7a352}
+  .verdict.bad{background:#361d1a;color:#e08379}
+  .chip.on{background:#1b2c1f;border-color:#2f4a35;color:#8dc39a}
+  .chip.blk{background:#361d1a;border-color:#5a2f29;color:#e08379}
+  .readiness-note{background:#33280f;color:#d7a352}
+}
