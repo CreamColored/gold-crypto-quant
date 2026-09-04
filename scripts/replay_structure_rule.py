@@ -189,6 +189,15 @@ def parse_arguments(argv):
         help="开仓赔率门槛：到中轨距离 ÷ 止损距离 低于该值就不开单，0=不启用",
     )
     parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "窗口截止时刻（北京时间，可带日期）。不给的话取到当天末尾，"
+            "而当天K线会随时间增长——同一条命令隔十分钟跑两次结果就不同，"
+            "任何参数扫描都会被这个增长混进去。做对照实验必须显式钉死。"
+        ),
+    )
+    parser.add_argument(
         "--provisional",
         action="store_true",
         help="重放在途K线（逐秒），只对 2026-09-03 15:05 之后的窗口有效",
@@ -215,6 +224,9 @@ def main(argv=None) -> int:
     args = parse_arguments(sys.argv[1:] if argv is None else argv)
     day = args.day
     end = pd.Timestamp(day, tz="UTC") + pd.Timedelta(days=1)
+    if args.until:
+        moment = args.until if " " in args.until else f"{day} {args.until}"
+        end = pd.Timestamp(moment, tz="Asia/Shanghai").tz_convert("UTC")
     main_bars, micro_bars = load_bars(end)
 
     # 起点取所有品种都攒够65根1分钟K线的时刻；XAU上线晚于BTC和ETH。
@@ -225,11 +237,13 @@ def main(argv=None) -> int:
         moment = args.since if " " in args.since else f"{day} {args.since}"
         cutoff = pd.Timestamp(moment, tz="Asia/Shanghai").tz_convert("UTC")
         start = max(start, cutoff - pd.Timedelta(hours=args.warmup_hours))
-    minutes = [t for t in micro_bars["ETH_USDT"].index if t >= start]
+    minutes = [t for t in micro_bars["ETH_USDT"].index if start <= t < end]
     if not minutes:
         print(f"{day} 没有可回放的1分钟行情")
         return 1
     print(f"回放 {minutes[0]} → {minutes[-1]}，共 {len(minutes)} 分钟")
+    if not args.until:
+        print("  注意：未指定 --until，窗口取到当天末尾且随时间增长，结果不可复现")
     if cutoff is not None:
         print(f"台账只统计 {cutoff.tz_convert('Asia/Shanghai'):%Y-%m-%d %H:%M} 北京时间之后开的仓")
 

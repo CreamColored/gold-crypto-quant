@@ -1471,7 +1471,10 @@ def run_multi_timeframe_paper_cycle(
                             reference,
                             float(main["bb_middle"]),
                             minute_open_time,
-                            f"{interval}震荡箱体触及{'上轨' if touched_upper else '下轨'}即时开仓",
+                            f"{interval}震荡箱体触及{'上轨' if touched_upper else '下轨'}"
+                            # 标出触发来源：不标的话事后分不清这一单是在途K线触发的
+                            # 还是收线才触发的，方案B到底起没起作用就无从验证。
+                            + ("在途触发开仓" if is_provisional else "即时开仓"),
                         )
                         # 记下开仓所在的K线。这一根收线后带着完整极值再来时，那些极值
                         # 可能发生在开仓之前——用入场前的价格止损是错的。
