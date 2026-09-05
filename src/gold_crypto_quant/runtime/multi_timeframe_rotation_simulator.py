@@ -15,7 +15,11 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-MULTI_ROTATION_STRATEGY_VERSION = "5.8.0"
+# V5.9：只改震荡行情识别，开仓/减仓/止损逻辑一律沿用 V5.8。
+# V5.8 的箱体判定只看"三轨走平"，在人工标注的三段行情上精确率 58%（15m）——
+# 认定的箱体里 42% 是单边行情。一年回放里 47% 的交易死于固定保护止损、
+# 亏 16,062U，而其余四类出场合计 +9,820U。病根在识别，不在开单。
+MULTI_ROTATION_STRATEGY_VERSION = "5.9.0"
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 # 5分钟不再直接触发交易，但仍留在 INTERVAL_PRIORITY 里——顶底结构要查全部七个周期，
 # 把它从那里拿掉会连结构判定一起丢掉。已经持有的5m仓位照常按原周期管理到结束。

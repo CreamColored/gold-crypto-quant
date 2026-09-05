@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
+from gold_crypto_quant.strategy import bollinger_range
 from gold_crypto_quant.strategy.bollinger_range import (
     BollingerRangeParameters,
     align_completed_regime_to_5m,
@@ -113,7 +114,14 @@ def test_same_timeframe_drift_thresholds_are_interval_specific() -> None:
     assert parameters_for_same_timeframe("1h").maximum_band_drift == 3.0
 
 
-def test_rotation_box_uses_continuous_three_bar_drift() -> None:
+def test_rotation_box_uses_continuous_three_bar_drift(monkeypatch) -> None:
+    """三轨连续走平在 V5.8 下成立；V5.9 会因为带宽过宽而否掉同一段数据。
+
+    这段合成数据是 [97, 103] 逐根交替——每根摆幅 6%、带宽 12%。
+    形态上确实是"稳定重复波动"，但真实 ETH 的震荡段带宽只有 0.95%，
+    非震荡段也才 1.94%。V5.9 给 15m 定的带宽上限是 1.2%，
+    所以这种量级的波动不该被当成可交易箱体——它更像单边行情里的剧烈震荡。
+    """
     index = pd.date_range("2026-01-01", periods=40, freq="15min", tz="UTC")
     closes = [97.0, 103.0] * 20
     bars = _bars(index)
@@ -122,8 +130,14 @@ def test_rotation_box_uses_continuous_three_bar_drift() -> None:
     bars["high"] = [value + 1.0 for value in closes]
     bars["low"] = [value - 1.0 for value in closes]
 
-    # 调用轨道轮转箱体计算，稳定重复波动应形成可交易箱体候选。
-    context = build_rotation_box_context(bars)
+    # V5.8 的判定：只看三轨走平，这段数据成立。
+    monkeypatch.setattr(bollinger_range, "REGIME_FILTER_ENABLED", False)
+    legacy = build_rotation_box_context(bars)
+    assert bool(legacy.iloc[-1]["box_candidate"]) is True
+    assert bool(legacy.iloc[-1]["breakout"]) is False
 
-    assert bool(context.iloc[-1]["box_candidate"]) is True
-    assert bool(context.iloc[-1]["breakout"]) is False
+    # V5.9 的判定：带宽 12% 远超 1.2% 上限，同一段数据被否掉。
+    monkeypatch.setattr(bollinger_range, "REGIME_FILTER_ENABLED", True)
+    strict = build_rotation_box_context(bars)
+    assert bool(strict.iloc[-1]["box_candidate"]) is False
+    assert float(strict.iloc[-1]["relative_width"]) > 10.0

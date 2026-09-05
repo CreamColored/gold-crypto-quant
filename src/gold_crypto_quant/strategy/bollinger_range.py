@@ -3,10 +3,16 @@
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 
 from gold_crypto_quant.risk.indicators import average_directional_index, average_true_range
 from gold_crypto_quant.strategy.live_signals import NextBarSignalDecision, SignalAction
+
+
+# 模块级总开关。回放做 A/B 对照时设 False 即可复现 V5.8 的箱体判定，
+# 不必改参数构造链。线上保持 True。
+REGIME_FILTER_ENABLED = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +36,31 @@ class BollingerRangeParameters:
     rotation_flat_window: int = 3
     minimum_bandwidth: float = 5.0
 
+    # ---- V5.9 震荡识别（四条合取）----
+    # 依据是用户在 2026-09-02～09-04 三段行情上的人工标注：
+    # 震荡段的带宽只有非震荡段的 0.4–0.5 倍、中轨穿越次数 1.7–2.1 倍、
+    # 带宽变化为负（收口）而非震荡段是 +71%～+130%（开口）、MACD 柱体 0.5–0.7 倍。
+    # 阈值由标注数据拟合得出，不是拍脑袋定的。
+    regime_enabled: bool = True
+    regime_window: int = 20
+    """判据的滚动窗口。V5.8 的"走平"只看连续 3 根，单边行情中途歇 3 根就能通过；
+    标注出的震荡段动辄几十根，窗口要匹配这个尺度。"""
+
+    maximum_relative_width: float = 1.2
+    """带宽上限，相对中轨的百分比。V5.8 只有下限没有上限——
+    但震荡的特征是带宽**窄**，宽带的单边行情不该被当成箱体。"""
+
+    minimum_middle_crossings: int = 3
+    """窗口内收盘价穿越中轨的最少次数。单边行情贴着一侧轨走、很少穿中轨；
+    震荡是"站上中轨然后上下摇摆"。这是 V5.8 完全没有的维度。"""
+
+    maximum_width_growth: float = 50.0
+    """窗口内带宽增长上限（百分比）。开口意味着单边行情正在展开。
+    标注数据里震荡段是负值（收口），非震荡段 +71% 起。"""
+
+    maximum_macd_histogram: float = 1.2
+    """MACD 柱体绝对值均值上限（相对价格的千分比）。动能有方向性积累就不是震荡。"""
+
     def __post_init__(self) -> None:
         if self.bollinger_period < 2 or self.regime_window < 2:
             raise ValueError("Bollinger period and regime window must be at least two")
@@ -49,6 +80,14 @@ class BollingerRangeParameters:
             raise ValueError("stop lock settings are invalid")
         if self.rotation_flat_window < 3 or self.minimum_bandwidth <= 0:
             raise ValueError("rotation box settings are invalid")
+        if self.regime_window < 5:
+            raise ValueError("震荡判据窗口至少 5 根")
+        if self.maximum_relative_width <= 0:
+            raise ValueError("带宽上限必须为正")
+        if self.minimum_middle_crossings < 0:
+            raise ValueError("中轨穿越次数不能为负")
+        if self.maximum_macd_histogram <= 0:
+            raise ValueError("柱体上限必须为正")
 
     def to_dict(self) -> dict[str, object]:
         """转换为可写入策略运行和准入记录的普通字典。"""
@@ -256,24 +295,75 @@ def build_rotation_box_context(
     breakout = ((~inside) & (~inside.shift(1).fillna(False).astype(bool))).fillna(False)
     normal_volume = indicators["volume_ratio"] <= parameters.maximum_volume_ratio
     result = indicators.copy()
-    result["box_candidate"] = (
+    box_candidate = (
         flat
         & (indicators["bb_width"] >= parameters.minimum_bandwidth)
         & normal_volume
         & ~breakout
-    ).fillna(False)
+    )
+
+    # ---- V5.9 震荡识别 ----
+    # V5.8 只判"三轨走平"，实测在人工标注的三段行情上精确率只有 58%（15m）——
+    # 它认定的箱体里 42% 是单边行情，策略在那里做高抛低吸，
+    # 一年回放里 47% 的交易死于固定保护止损、亏掉 16,062U。
+    # 这四条来自标注数据里区分度最强的四个特征。
+    if parameters.regime_enabled and REGIME_FILTER_ENABLED:
+        window = parameters.regime_window
+        middle = indicators["bb_middle"]
+        # 带宽相对中轨，做成百分比才能跨品种跨价格比较。
+        relative_width = indicators["bb_width"] / middle * 100.0
+        # 中轨穿越：收盘价相对中轨的符号翻转次数。
+        side = np.sign(bars["close"] - middle)
+        crossings = (side != side.shift(1)).rolling(window).sum()
+        # 带宽变化：正为开口（单边展开），负为收口。
+        width_growth = (
+            relative_width.diff(window) / relative_width.shift(window).replace(0.0, pd.NA) * 100.0
+        )
+        # MACD 柱体绝对值，按价格归一到千分比。
+        fast = bars["close"].ewm(span=12, adjust=False).mean()
+        slow = bars["close"].ewm(span=26, adjust=False).mean()
+        dif = fast - slow
+        histogram = dif - dif.ewm(span=9, adjust=False).mean()
+        histogram_scale = (histogram.abs() / bars["close"] * 1000.0).rolling(window).mean()
+
+        box_candidate &= (
+            (relative_width <= parameters.maximum_relative_width)
+            & (crossings >= parameters.minimum_middle_crossings)
+            & (width_growth <= parameters.maximum_width_growth)
+            & (histogram_scale <= parameters.maximum_macd_histogram)
+        )
+        result["relative_width"] = relative_width
+        result["middle_crossings"] = crossings
+        result["width_growth"] = width_growth
+        result["histogram_scale"] = histogram_scale
+
+    result["box_candidate"] = box_candidate.fillna(False)
     result["breakout"] = breakout.astype(bool)
     return result
 
 
 def parameters_for_same_timeframe(interval: str) -> BollingerRangeParameters:
     """返回各同周期模式的三轨连续走平点数阈值。"""
+    # 震荡判据的阈值按周期分别拟合。周期越大带宽天然越宽，用同一个数会
+    # 让大周期永远不合格。1h 的人工标注只有 9 根、拟合不可靠，沿用 30m 的值。
     if interval == "15m":
-        return BollingerRangeParameters(maximum_band_drift=2.5)
+        return BollingerRangeParameters(
+            maximum_band_drift=2.5,
+            maximum_relative_width=1.2,
+            maximum_macd_histogram=1.2,
+        )
     if interval == "5m":
-        return BollingerRangeParameters(maximum_band_drift=1.0)
+        return BollingerRangeParameters(
+            maximum_band_drift=1.0,
+            maximum_relative_width=0.9,
+            maximum_macd_histogram=0.9,
+        )
     if interval in {"30m", "1h"}:
-        return BollingerRangeParameters(maximum_band_drift=3.0)
+        return BollingerRangeParameters(
+            maximum_band_drift=3.0,
+            maximum_relative_width=1.8,
+            maximum_macd_histogram=1.7,
+        )
     raise ValueError("same-timeframe Bollinger strategy supports 5m, 15m, 30m and 1h")
 
 

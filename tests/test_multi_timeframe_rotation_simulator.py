@@ -28,10 +28,24 @@ from gold_crypto_quant.runtime.multi_timeframe_rotation_simulator import (
     _try_release_symbol_after_wait,
     run_multi_timeframe_paper_cycle,
 )
+from gold_crypto_quant.strategy import bollinger_range
 from gold_crypto_quant.strategy.bollinger_range import (
     build_rotation_box_context,
     parameters_for_same_timeframe,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_regime_filter(monkeypatch):
+    """本文件测的是开仓/减仓/止损机制，不是震荡识别。
+
+    合成数据是 [97, 103] 逐根交替——摆幅每根 6%、带宽 12%，
+    而真实 ETH 的震荡段带宽只有 0.95%。V5.9 的带宽上限（15m 取 1.2%）
+    会正确地拒掉这种数据，但那不是这些用例要验证的东西。
+    识别本身由 test_regime_filter.py 用真实量级的数据覆盖。
+    """
+    monkeypatch.setattr(bollinger_range, "REGIME_FILTER_ENABLED", False)
+
 
 FREQUENCIES = {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h"}
 LAST_OPEN = {

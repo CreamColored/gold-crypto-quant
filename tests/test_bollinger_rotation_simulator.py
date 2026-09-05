@@ -3,11 +3,21 @@
 import json
 
 import pandas as pd
+import pytest
 
 from gold_crypto_quant.runtime.bollinger_rotation_simulator import (
     run_rotation_paper_cycle,
 )
+from gold_crypto_quant.strategy import bollinger_range
 from gold_crypto_quant.strategy.bollinger_range import build_rotation_box_context
+
+
+@pytest.fixture(autouse=True)
+def _disable_regime_filter(monkeypatch):
+    """本文件测的是开仓与成交机制，用的是 [97, 103] 交替的合成数据（带宽 12%）。
+    V5.9 的带宽上限会正确拒掉它，但那不是这些用例要验证的东西。"""
+    monkeypatch.setattr(bollinger_range, "REGIME_FILTER_ENABLED", False)
+
 
 
 def _rotation_bars(periods: int) -> pd.DataFrame:
