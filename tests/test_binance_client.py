@@ -1,6 +1,7 @@
 """币安实盘公共行情客户端测试。"""
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -34,6 +35,35 @@ def test_public_client_reads_klines_without_auth_headers() -> None:
     assert frame.iloc[0]["close"] == 101
     assert frame.iloc[0]["trade_count"] == 7
     assert all("x-mbx-apikey" not in headers for headers in seen_headers)
+
+
+def test_public_client_sends_history_time_range_in_milliseconds() -> None:
+    """分页回溯使用币安的毫秒时间参数，且不允许无时区时间混入。"""
+    seen_query: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_query.update(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    with BinancePublicClient(transport=httpx.MockTransport(handler)) as client:
+        client.get_candlesticks(
+            "BTCUSDT",
+            "1m",
+            limit=1500,
+            start_time=datetime(2025, 9, 5, tzinfo=UTC),
+            end_time=datetime(2026, 9, 5, tzinfo=UTC),
+        )
+
+    assert seen_query["limit"] == "1500"
+    assert seen_query["startTime"] == "1757030400000"
+    assert seen_query["endTime"] == "1788566400000"
+
+
+def test_public_client_rejects_naive_history_time() -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=[]))
+    with BinancePublicClient(transport=transport) as client:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            client.get_candlesticks("BTCUSDT", "1m", end_time=datetime(2026, 9, 5))
 
 
 def test_exchange_symbol_validation_is_cached() -> None:

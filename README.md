@@ -54,6 +54,7 @@ ruff check .
 # 以下为单交易所（仅Gate）研究与历史命令，非当前日常运行路径
 python main.py import-gate-bars --limit 1000
 python main.py import-gate-bars --history-days 90 --limit 2000
+python main.py import-binance-bars --history-days 365 --limit 1500  # 币安最近一年
 python main.py backtest-bollinger --contracts ETH_USDT
 python main.py qualify-bollinger --contracts ETH_USDT
 # 以下EMA命令仅保留旧研究复现能力，不再具有运行准入权限

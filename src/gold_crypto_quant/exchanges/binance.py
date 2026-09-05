@@ -1,5 +1,6 @@
 """币安U本位永续实盘公共行情客户端；不包含密钥、账户或下单方法。"""
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
@@ -72,16 +73,22 @@ class BinancePublicClient:
         interval: str,
         *,
         limit: int = 500,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> pd.DataFrame:
         """读取公开成交K线并标准化为内部OHLCV格式。"""
         if interval not in SUPPORTED_INTERVALS:
             raise ValueError(f"unsupported Binance interval: {interval}")
         if not 1 <= limit <= 1500:
             raise ValueError("Binance candlestick limit must be in [1, 1500]")
-        data = self._request_json(
-            "/fapi/v1/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-        )
+        params: dict[str, object] = {"symbol": symbol, "interval": interval, "limit": limit}
+        for name, value in (("startTime", start_time), ("endTime", end_time)):
+            if value is None:
+                continue
+            if value.tzinfo is None:
+                raise ValueError("candlestick time range must be timezone-aware")
+            params[name] = int(value.timestamp() * 1000)
+        data = self._request_json("/fapi/v1/klines", params=params)
         if not isinstance(data, list):
             raise BinanceApiError("Binance candlestick response must be a list")
         rows: list[dict[str, object]] = []

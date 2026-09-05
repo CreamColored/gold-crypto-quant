@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Event
 
 from gold_crypto_quant.config import Settings, get_settings
+from gold_crypto_quant.exchanges.binance import BinancePublicClient
 from gold_crypto_quant.exchanges.gate import GateTestnetClient
 from gold_crypto_quant.exchanges.oanda import (
     OandaApiError,
@@ -16,7 +17,11 @@ from gold_crypto_quant.exchanges.oanda import (
     OandaPracticeClient,
     resolve_oanda_account_id,
 )
-from gold_crypto_quant.market_data import import_gate_history, import_oanda_history
+from gold_crypto_quant.market_data import (
+    import_binance_history,
+    import_gate_history,
+    import_oanda_history,
+)
 from gold_crypto_quant.market_data.gate_history import GATE_TESTNET_VENUE
 from gold_crypto_quant.market_data.oanda_history import OANDA_PRACTICE_VENUE
 from gold_crypto_quant.notifications import RuntimeEventNotifier
@@ -119,6 +124,7 @@ def main() -> None:
             "db-check",
             "init-db",
             "sync-comments",
+            "import-binance-bars",
             "import-gate-bars",
             "import-oanda-bars",
             "backtest-bollinger",
@@ -158,7 +164,7 @@ def main() -> None:
         ),
         default="status",
     )
-    # K线导入参数只在 import-gate-bars 命令中使用，其他命令会安全忽略这些默认值。
+    # K线导入参数只在历史导入命令中使用，其他命令会安全忽略这些默认值。
     parser.add_argument("--limit", type=int, default=1000, help="每个合约周期获取的K线数量")
     # history-days用于分批向前回溯；省略时保持原来的“仅刷新最近K线”行为。
     parser.add_argument("--history-days", type=int, help="向前补齐指定天数的历史K线")
@@ -290,6 +296,23 @@ def main() -> None:
                 f"{result.contract} {result.interval}: fetched={result.fetched}, "
                 f"stored={result.stored}, skipped_open={result.skipped_open}, "
                 f"pages={result.pages}, history={history_status}"
+            )
+        return
+    if args.command == "import-binance-bars":
+        # 只调用币安U本位永续公共行情，不读取API密钥，也不存在订单接口。
+        with BinancePublicClient() as client:
+            results = import_binance_history(
+                client,
+                contracts=tuple(args.contracts),
+                intervals=tuple(args.intervals),
+                limit=args.limit,
+                history_days=args.history_days,
+            )
+        for result in results:
+            print(
+                f"{result.contract} {result.interval}: fetched={result.fetched}, "
+                f"stored={result.stored}, skipped_open={result.skipped_open}, "
+                f"pages={result.pages}"
             )
         return
     if args.command == "import-oanda-bars":
