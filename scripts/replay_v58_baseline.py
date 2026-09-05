@@ -69,6 +69,12 @@ def main() -> int:
     parser.add_argument("--symbols", default="BTC_USDT,ETH_USDT")
     parser.add_argument("--tag", default="v58-baseline")
     parser.add_argument("--progress-every", type=int, default=20000)
+    parser.add_argument("--entry-intervals",
+                        help="覆盖入场周期，逗号分隔。V5.8 默认 15m,30m,1h——"
+                             "5m 被排除在入场之外，只参与顶底结构判断。"
+                             "传 5m,15m,30m,1h 就是放开 5m 交易。")
+    parser.add_argument("--regime-off", action="store_true",
+                        help="关掉 V5.9 的震荡识别，复现 V5.8 的箱体判定，用于 A/B 对照")
     parser.add_argument("--disable-fuse", action="store_true",
                         help="关掉 8%% 最大回撤永久熔断。研究策略本身时要摘掉风控闸门——"
                              "否则量到的是闸门什么时候关，不是策略好不好。线上绝不能关。")
@@ -91,10 +97,21 @@ def main() -> int:
         print(f"缺少数据：{missing}", file=sys.stderr)
         return 2
 
+    if args.regime_off:
+        from gold_crypto_quant.strategy import bollinger_range as br
+        br.REGIME_FILTER_ENABLED = False
     if args.disable_fuse:
         sim.MAX_DRAWDOWN_FUSE = 1.0
+    if args.entry_intervals:
+        # 三处使用点都在函数内读模块全局，运行前覆盖即可，不必改死代码。
+        sim.ENTRY_INTERVAL_PRIORITY = tuple(
+            x.strip() for x in args.entry_intervals.split(",") if x.strip()
+        )
     print(f"窗口 {start:%Y-%m-%d} → {end:%Y-%m-%d}（{args.days:.0f} 天）  {args.venue}")
     print(f"最大回撤熔断：{'已关闭（仅研究用）' if args.disable_fuse else f'{sim.MAX_DRAWDOWN_FUSE:.0%}'}")
+    print(f"入场周期：{'、'.join(sim.ENTRY_INTERVAL_PRIORITY)}")
+    from gold_crypto_quant.strategy import bollinger_range as _br
+    print(f"震荡识别：{'V5.9 四条判据' if _br.REGIME_FILTER_ENABLED else 'V5.8 仅三轨走平'}")
     for s in symbols:
         counts = "  ".join(f"{i}:{len(b):,}" for i, b in main_bars[s].items())
         print(f"  {s}  1m:{len(micro[s]):,}  {counts}")
@@ -184,6 +201,8 @@ def main() -> int:
         "window": {"start": str(start), "end": str(end), "days": args.days},
         "strategy_version": sim.MULTI_ROTATION_STRATEGY_VERSION,
         "max_drawdown_fuse": sim.MAX_DRAWDOWN_FUSE,
+        "entry_intervals": list(sim.ENTRY_INTERVAL_PRIORITY),
+        "regime_filter": _br.REGIME_FILTER_ENABLED,
         "final_equity": equity, "total_return": equity / 10_000 - 1,
         "opens": len(opens), "closes": len(closes), "wins": wins,
         "exit_reasons": dict(reasons),
