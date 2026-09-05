@@ -49,6 +49,12 @@ LADDER_REDUCE_RATIO = 0.50
 # 不要改回负的maker费率——那是VIP4以上才有的挂单返佣，普通账户拿不到。
 # 2026-09-03实测：当天73笔成交、名义额32.2万U，返佣假设让手续费少算47.95U，
 # 足以把当天的+18.73U翻成-29.22U。
+# 最大回撤熔断阈值。烧掉之后是**永久的**，没有恢复路径——2025-09 到 2026-09 的
+# 一年回放里，第 17-35 天就触发了，剩下 330 天一笔没开。
+# 提成常量是为了让回放能覆盖它：研究策略本身时要把风控闸门摘掉，
+# 否则量到的是闸门什么时候关，不是策略好不好。线上必须保持 0.08。
+MAX_DRAWDOWN_FUSE = 0.08
+
 MAKER_FEE_RATE = 0.0002
 TAKER_FEE_RATE = 0.0005
 
@@ -1627,11 +1633,11 @@ def run_multi_timeframe_paper_cycle(
             state.daily_blocked = True
         state.peak_equity = max(state.peak_equity, state.equity)
         drawdown = 1.0 - state.equity / state.peak_equity
-        if drawdown >= 0.08 and not state.permanent_fuse:
+        if drawdown >= MAX_DRAWDOWN_FUSE and not state.permanent_fuse:
             state.permanent_fuse = True
             add_event(
                 close_time,
-                "模拟账户触发8%最大回撤熔断",
+                f"模拟账户触发{MAX_DRAWDOWN_FUSE:.0%}最大回撤熔断",
                 "ACCOUNT",
                 "ACCOUNT",
                 f"当前回撤：{drawdown:.2%}",

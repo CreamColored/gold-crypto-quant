@@ -69,6 +69,9 @@ def main() -> int:
     parser.add_argument("--symbols", default="BTC_USDT,ETH_USDT")
     parser.add_argument("--tag", default="v58-baseline")
     parser.add_argument("--progress-every", type=int, default=20000)
+    parser.add_argument("--disable-fuse", action="store_true",
+                        help="关掉 8%% 最大回撤永久熔断。研究策略本身时要摘掉风控闸门——"
+                             "否则量到的是闸门什么时候关，不是策略好不好。线上绝不能关。")
     args = parser.parse_args()
 
     symbols = tuple(args.symbols.split(","))
@@ -88,7 +91,10 @@ def main() -> int:
         print(f"缺少数据：{missing}", file=sys.stderr)
         return 2
 
+    if args.disable_fuse:
+        sim.MAX_DRAWDOWN_FUSE = 1.0
     print(f"窗口 {start:%Y-%m-%d} → {end:%Y-%m-%d}（{args.days:.0f} 天）  {args.venue}")
+    print(f"最大回撤熔断：{'已关闭（仅研究用）' if args.disable_fuse else f'{sim.MAX_DRAWDOWN_FUSE:.0%}'}")
     for s in symbols:
         counts = "  ".join(f"{i}:{len(b):,}" for i, b in main_bars[s].items())
         print(f"  {s}  1m:{len(micro[s]):,}  {counts}")
@@ -177,13 +183,17 @@ def main() -> int:
         "tag": args.tag, "venue": args.venue, "symbols": list(symbols),
         "window": {"start": str(start), "end": str(end), "days": args.days},
         "strategy_version": sim.MULTI_ROTATION_STRATEGY_VERSION,
+        "max_drawdown_fuse": sim.MAX_DRAWDOWN_FUSE,
         "final_equity": equity, "total_return": equity / 10_000 - 1,
         "opens": len(opens), "closes": len(closes), "wins": wins,
         "exit_reasons": dict(reasons),
         "elapsed_minutes": round(elapsed / 60, 2),
+        # RotationPaperEvent 的字段是 event_key/title/lines/severity。
+        # event_key 形如 rotation-v5:<时间>:<品种>:<周期>:<标题>:<序号>，
+        # 明细在 lines 里。上一轮按 moment/detail/pnl 取属性，全取到空值。
         "events": [
-            {"time": str(getattr(e, "moment", "")), "title": e.title,
-             "detail": getattr(e, "detail", ""), "pnl": getattr(e, "pnl", None)}
+            {"key": e.event_key, "title": e.title,
+             "lines": list(e.lines), "severity": e.severity}
             for e in events
         ],
     }
