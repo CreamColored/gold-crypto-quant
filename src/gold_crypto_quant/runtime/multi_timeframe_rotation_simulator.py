@@ -15,11 +15,13 @@ from gold_crypto_quant.strategy.bollinger_range import (
     parameters_for_same_timeframe,
 )
 
-# V5.9：只改震荡行情识别，开仓/减仓/止损逻辑一律沿用 V5.8。
+# V6：把每根移动的布林带升级为有形成、确认、老化、破坏阶段的固定箱体。
 # V5.8 的箱体判定只看"三轨走平"，在人工标注的三段行情上精确率 58%（15m）——
 # 认定的箱体里 42% 是单边行情。一年回放里 47% 的交易死于固定保护止损、
 # 亏 16,062U，而其余四类出场合计 +9,820U。病根在识别，不在开单。
-MULTI_ROTATION_STRATEGY_VERSION = "5.9.0"
+MULTI_ROTATION_STRATEGY_VERSION = "6.0.0"
+# 研究回放可临时关闭，线上V6保持开启；同一执行器才能做公平A/B。
+RANGE_LIFECYCLE_ENABLED = True
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 # 5分钟不再直接触发交易，但仍留在 INTERVAL_PRIORITY 里——顶底结构要查全部七个周期，
 # 把它从那里拿掉会连结构判定一起丢掉。已经持有的5m仓位照常按原周期管理到结束。
@@ -115,6 +117,15 @@ class MultiTimeframePaperState:
     # 止损判定，从下一根开始正常判。
     opened_in_bar: dict[str, str] = field(default_factory=dict)
     box_active: dict[str, dict[str, bool]] = field(default_factory=dict)
+    # V6冻结箱体：形成时保存三轨，之后动态指标只更新证据与突破风险，不移动交易边界。
+    box_upper: dict[str, dict[str, float]] = field(default_factory=dict)
+    box_middle: dict[str, dict[str, float]] = field(default_factory=dict)
+    box_lower: dict[str, dict[str, float]] = field(default_factory=dict)
+    box_started_at: dict[str, dict[str, str]] = field(default_factory=dict)
+    box_last_evaluated_at: dict[str, dict[str, str]] = field(default_factory=dict)
+    box_age_bars: dict[str, dict[str, int]] = field(default_factory=dict)
+    box_evidence_score: dict[str, dict[str, float]] = field(default_factory=dict)
+    box_breakout_risk: dict[str, dict[str, float]] = field(default_factory=dict)
     blocked_after_stop: dict[str, dict[str, bool]] = field(default_factory=dict)
     reset_streak: dict[str, dict[str, int]] = field(default_factory=dict)
     positions: dict[str, SymbolPaperPositionState] = field(default_factory=dict)
@@ -157,6 +168,21 @@ class MicroEntryDecision:
     percent_b_3m: float | None = None
 
 
+def _capped_risk_quantity(
+    risk_budget: float,
+    actual_loss_per_unit: float,
+    reference_loss_per_unit: float,
+) -> float:
+    """紧止损只降低风险，不允许因为止损变近而反向放大仓位。"""
+
+    if min(risk_budget, actual_loss_per_unit, reference_loss_per_unit) <= 0:
+        return 0.0
+    return min(
+        risk_budget / actual_loss_per_unit,
+        risk_budget / reference_loss_per_unit,
+    )
+
+
 def _new_state(initial_equity: float, symbols: tuple[str, ...]) -> MultiTimeframePaperState:
     """创建所有品种、所有周期共享权益且全局单持仓的影子账户。"""
     return MultiTimeframePaperState(
@@ -166,6 +192,14 @@ def _new_state(initial_equity: float, symbols: tuple[str, ...]) -> MultiTimefram
         box_active={
             symbol: {interval: False for interval in INTERVAL_PRIORITY} for symbol in symbols
         },
+        box_upper={symbol: {interval: 0.0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_middle={symbol: {interval: 0.0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_lower={symbol: {interval: 0.0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_started_at={symbol: {interval: "" for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_last_evaluated_at={symbol: {interval: "" for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_age_bars={symbol: {interval: 0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_evidence_score={symbol: {interval: 0.0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
+        box_breakout_risk={symbol: {interval: 0.0 for interval in INTERVAL_PRIORITY} for symbol in symbols},
         blocked_after_stop={
             symbol: {interval: False for interval in INTERVAL_PRIORITY} for symbol in symbols
         },
@@ -188,7 +222,7 @@ def _load_state(path: Path) -> MultiTimeframePaperState | None:
     raw_positions = payload.pop("positions", {})
     stored_version = str(payload.get("strategy_version", ""))
     # 旧V5状态可原地升级：保留权益和已有仓位，仅补上新增的安全游标和等待字段。
-    if stored_version in {"5.3.0", "5.4.0", "5.5.0", "5.6.0", "5.7.0"}:
+    if stored_version in {"5.3.0", "5.4.0", "5.5.0", "5.6.0", "5.7.0", "5.8.0", "5.9.0"}:
         payload["strategy_version"] = MULTI_ROTATION_STRATEGY_VERSION
         payload.setdefault(
             "symbol_blocked_after_stop",
@@ -206,6 +240,22 @@ def _load_state(path: Path) -> MultiTimeframePaperState | None:
             "last_micro_bar_times",
             {symbol: "" for symbol in raw_positions},
         )
+        # 旧版没有冻结边界，不能把活动的动态轨假装成已确认箱体；保留权益和仓位，
+        # 空仓品种从下一根已收盘K线重新形成V6箱体。
+        payload["box_active"] = {
+            symbol: {interval: False for interval in INTERVAL_PRIORITY}
+            for symbol in raw_positions
+        }
+        for field_name, default in (
+            ("box_upper", 0.0), ("box_middle", 0.0), ("box_lower", 0.0),
+            ("box_started_at", ""), ("box_last_evaluated_at", ""),
+            ("box_age_bars", 0), ("box_evidence_score", 0.0),
+            ("box_breakout_risk", 1.0),
+        ):
+            payload[field_name] = {
+                symbol: {interval: default for interval in INTERVAL_PRIORITY}
+                for symbol in raw_positions
+            }
     state = MultiTimeframePaperState(**payload)
     state.positions = {
         symbol: SymbolPaperPositionState(**position) for symbol, position in raw_positions.items()
@@ -266,6 +316,12 @@ def _block_symbol_after_stop(
     ).isoformat()
     for blocked_interval in INTERVAL_PRIORITY:
         state.box_active[symbol][blocked_interval] = False
+        state.box_upper[symbol][blocked_interval] = 0.0
+        state.box_middle[symbol][blocked_interval] = 0.0
+        state.box_lower[symbol][blocked_interval] = 0.0
+        state.box_started_at[symbol][blocked_interval] = ""
+        state.box_age_bars[symbol][blocked_interval] = 0
+        state.box_breakout_risk[symbol][blocked_interval] = 1.0
         state.blocked_after_stop[symbol][blocked_interval] = True
         state.reset_streak[symbol][blocked_interval] = 0
 
@@ -275,18 +331,95 @@ def _refresh_box_qualification(
     symbol: str,
     interval: str,
     *,
-    box_candidate: bool,
-    breakout: bool,
+    box_candidate: bool | None = None,
+    breakout: bool | None = None,
+    context_row: pd.Series | None = None,
+    parameters=None,
 ) -> None:
-    """用最新已收盘K线刷新箱体资格；不允许沿用已经失效的旧箱体。"""
-    if breakout or not box_candidate:
-        state.box_active[symbol][interval] = False
-        state.reset_streak[symbol][interval] = 0
+    """推进V6箱体生命周期；兼容旧单元测试传入两个布尔值的调用方式。"""
+    if context_row is None or parameters is None or not RANGE_LIFECYCLE_ENABLED:
+        if context_row is not None:
+            box_candidate = bool(context_row["box_candidate"])
+            breakout = bool(context_row["breakout"])
+        if breakout or not box_candidate:
+            state.box_active[symbol][interval] = False
+            state.reset_streak[symbol][interval] = 0
+            return
+        if state.blocked_after_stop[symbol][interval]:
+            state.box_active[symbol][interval] = False
+            return
+        state.box_active[symbol][interval] = True
         return
-    if state.blocked_after_stop[symbol][interval]:
+
+    evaluated_at = pd.Timestamp(context_row.name).isoformat()
+    if state.box_last_evaluated_at[symbol][interval] == evaluated_at:
+        return
+    state.box_last_evaluated_at[symbol][interval] = evaluated_at
+    candidate = bool(context_row["box_candidate"])
+    broken_dynamic = bool(context_row["breakout"])
+    evidence = float(context_row.get("range_evidence_score", 0.0))
+    risk = float(context_row.get("breakout_risk_score", 1.0))
+    state.box_evidence_score[symbol][interval] = evidence
+    state.box_breakout_risk[symbol][interval] = risk
+
+    if state.box_active[symbol][interval]:
+        state.box_age_bars[symbol][interval] += 1
+        close = float(context_row["close"])
+        buffer = parameters.maximum_band_drift
+        hard_break = (
+            close > state.box_upper[symbol][interval] + buffer
+            or close < state.box_lower[symbol][interval] - buffer
+            or state.box_age_bars[symbol][interval] > parameters.lifecycle_maximum_age_bars
+        )
+        if not hard_break:
+            return
         state.box_active[symbol][interval] = False
+        state.box_upper[symbol][interval] = 0.0
+        state.box_middle[symbol][interval] = 0.0
+        state.box_lower[symbol][interval] = 0.0
+        state.box_started_at[symbol][interval] = ""
+        state.box_age_bars[symbol][interval] = 0
+        state.reset_streak[symbol][interval] = 0
+        # 破位收线只能结束旧箱体，不能同时用同一根K线建立新箱体。
+        return
+
+    if state.blocked_after_stop[symbol][interval]:
+        return
+    qualified = (
+        candidate
+        and not broken_dynamic
+        and evidence >= parameters.minimum_range_evidence
+        and risk <= parameters.maximum_breakout_risk
+    )
+    state.reset_streak[symbol][interval] = (
+        state.reset_streak[symbol][interval] + 1 if qualified else 0
+    )
+    if state.reset_streak[symbol][interval] < parameters.lifecycle_confirmation_bars:
         return
     state.box_active[symbol][interval] = True
+    state.box_upper[symbol][interval] = float(context_row["bb_upper"])
+    state.box_middle[symbol][interval] = float(context_row["bb_middle"])
+    state.box_lower[symbol][interval] = float(context_row["bb_lower"])
+    state.box_started_at[symbol][interval] = evaluated_at
+    state.box_age_bars[symbol][interval] = 0
+    state.reset_streak[symbol][interval] = 0
+
+
+def _box_levels(
+    state: MultiTimeframePaperState,
+    symbol: str,
+    interval: str,
+    fallback: pd.Series,
+) -> tuple[float, float, float]:
+    """返回已冻结的上中下边界；迁移中的旧持仓缺字段时才退回当前轨道。"""
+    if not RANGE_LIFECYCLE_ENABLED:
+        return float(fallback["bb_upper"]), float(fallback["bb_middle"]), float(fallback["bb_lower"])
+    upper = state.box_upper.get(symbol, {}).get(interval, 0.0)
+    middle = state.box_middle.get(symbol, {}).get(interval, 0.0)
+    lower = state.box_lower.get(symbol, {}).get(interval, 0.0)
+    if upper > middle > lower > 0:
+        return upper, middle, lower
+    return float(fallback["bb_upper"]), float(fallback["bb_middle"]), float(fallback["bb_lower"])
 
 
 def _bands_are_opening(context: pd.DataFrame, position: int) -> bool:
@@ -703,7 +836,17 @@ def _try_release_symbol_after_wait(
         return False
     position = active_item[2]
     current = contexts[symbol][interval].iloc[position]
+    parameters = _parameters_for_symbol(
+        symbol, interval, contexts[symbol][interval].loc[: current.name]
+    )
+    has_v6_scores = "range_evidence_score" in current and "breakout_risk_score" in current
     valid_box = bool(current["box_candidate"]) and not bool(current["breakout"])
+    if has_v6_scores:
+        valid_box = (
+            valid_box
+            and float(current["range_evidence_score"]) >= parameters.minimum_range_evidence
+            and float(current["breakout_risk_score"]) <= parameters.maximum_breakout_risk
+        )
     if not valid_box or _bands_are_opening(contexts[symbol][interval], position):
         return False
     state.symbol_blocked_after_stop[symbol] = False
@@ -713,7 +856,11 @@ def _try_release_symbol_after_wait(
         state.blocked_after_stop[symbol][candidate_interval] = False
         state.box_active[symbol][candidate_interval] = False
         state.reset_streak[symbol][candidate_interval] = 0
-    state.box_active[symbol][interval] = True
+    # V6解除等待后重新累计两根合格收线；旧测试上下文没有评分字段，保持V5兼容行为。
+    if has_v6_scores:
+        state.reset_streak[symbol][interval] = 0
+    else:
+        state.box_active[symbol][interval] = True
     return True
 
 
@@ -877,7 +1024,7 @@ def run_multi_timeframe_paper_cycle(
             active_interval="",
             selected_symbol="",
             selected_interval="",
-            reason="V5共享影子账户已从各品种各周期最新收盘K线开始",
+            reason="V6固定箱体影子账户已从各品种各周期最新收盘K线开始",
             provisional_watch="",
             # 首次建账必然无持仓；不写死会让通知里出现空白的"持仓："一行。
             holdings="全部空仓",
@@ -893,6 +1040,14 @@ def run_multi_timeframe_paper_cycle(
         state.symbol_stopped_interval[symbol] = ""
         state.symbol_resume_check_after[symbol] = ""
         state.box_active[symbol] = {interval: False for interval in INTERVAL_PRIORITY}
+        state.box_upper[symbol] = {interval: 0.0 for interval in INTERVAL_PRIORITY}
+        state.box_middle[symbol] = {interval: 0.0 for interval in INTERVAL_PRIORITY}
+        state.box_lower[symbol] = {interval: 0.0 for interval in INTERVAL_PRIORITY}
+        state.box_started_at[symbol] = {interval: "" for interval in INTERVAL_PRIORITY}
+        state.box_last_evaluated_at[symbol] = {interval: "" for interval in INTERVAL_PRIORITY}
+        state.box_age_bars[symbol] = {interval: 0 for interval in INTERVAL_PRIORITY}
+        state.box_evidence_score[symbol] = {interval: 0.0 for interval in INTERVAL_PRIORITY}
+        state.box_breakout_risk[symbol] = {interval: 0.0 for interval in INTERVAL_PRIORITY}
         state.blocked_after_stop[symbol] = {interval: False for interval in INTERVAL_PRIORITY}
         state.reset_streak[symbol] = {interval: 0 for interval in INTERVAL_PRIORITY}
         state.last_bar_times[symbol] = {
@@ -976,17 +1131,52 @@ def run_multi_timeframe_paper_cycle(
         position.active_interval = interval
         position.entry_time = timestamp.isoformat()
         position.entry_price = reference
-        position.stop_price = (
-            reference - parameters.fixed_stop_distance
-            if side == "LONG"
-            else reference + parameters.fixed_stop_distance
-        )
+        # V6止损放在冻结箱体边界之外；没有冻结边界的迁移中旧状态才退回固定点数。
+        frozen_upper = state.box_upper.get(symbol, {}).get(interval, 0.0)
+        frozen_lower = state.box_lower.get(symbol, {}).get(interval, 0.0)
+        boundary_buffer = parameters.maximum_band_drift
+        if RANGE_LIFECYCLE_ENABLED and frozen_upper > frozen_lower > 0:
+            position.stop_price = (
+                frozen_lower - boundary_buffer
+                if side == "LONG"
+                else frozen_upper + boundary_buffer
+            )
+        else:
+            position.stop_price = (
+                reference - parameters.fixed_stop_distance
+                if side == "LONG"
+                else reference + parameters.fixed_stop_distance
+            )
         stop_fill = position.stop_price * (
             1.0 - stop_slippage_rate if side == "LONG" else 1.0 + stop_slippage_rate
         )
         adverse_loss = reference - stop_fill if side == "LONG" else stop_fill - reference
         loss_per_unit = adverse_loss + reference * maker_fee_rate + stop_fill * taker_fee_rate
-        position.quantity = state.equity * risk_per_trade / loss_per_unit
+        risk_budget = state.equity * risk_per_trade
+        # 结构止损缩短时不反向放大仓位。否则3点止损和12点止损每次仍同亏0.25%，
+        # “止损近所以损得少”不会成立，反而因噪声止损次数增加而亏得更多。
+        reference_stop = (
+            reference - parameters.fixed_stop_distance
+            if side == "LONG"
+            else reference + parameters.fixed_stop_distance
+        )
+        reference_fill = reference_stop * (
+            1.0 - stop_slippage_rate if side == "LONG" else 1.0 + stop_slippage_rate
+        )
+        reference_adverse = (
+            reference - reference_fill if side == "LONG" else reference_fill - reference
+        )
+        reference_loss_per_unit = (
+            reference_adverse
+            + reference * maker_fee_rate
+            + reference_fill * taker_fee_rate
+        )
+        position.quantity = _capped_risk_quantity(
+            risk_budget,
+            loss_per_unit,
+            reference_loss_per_unit,
+        )
+        actual_risk = position.quantity * loss_per_unit
         position.remaining_quantity = position.quantity
         position.entry_fee_remaining = reference * position.quantity * maker_fee_rate
         state.equity -= position.entry_fee_remaining
@@ -1037,8 +1227,8 @@ def run_multi_timeframe_paper_cycle(
             f"数量：{position.quantity:.6f} {_base_asset(symbol)}",
             f"名义价值：{reference * position.quantity:,.2f} USDT",
             (
-                f"本单风险：{state.equity * risk_per_trade:.2f} USDT"
-                f"（账户{risk_per_trade:.2%}）"
+                f"本单风险：{actual_risk:.2f} USDT"
+                f"（账户{actual_risk / state.equity:.2%}，上限{risk_per_trade:.2%}）"
             ),
             (
                 f"保护止损：{position.stop_price:.2f}"
@@ -1047,6 +1237,16 @@ def run_multi_timeframe_paper_cycle(
             ),
             f"中轨参考价：{middle_reference:.2f}",
             f"减仓触发价：{middle_trigger:.2f}（{reduction_rule}）",
+            *(
+                (
+                    f"V6固定箱体：{frozen_lower:.2f} / {middle_reference:.2f} / {frozen_upper:.2f}",
+                    f"箱体年龄：{state.box_age_bars[symbol][interval]}根{interval}K线",
+                    f"震荡证据：{state.box_evidence_score[symbol][interval]:.2f}",
+                    f"突破风险：{state.box_breakout_risk[symbol][interval]:.2f}",
+                )
+                if RANGE_LIFECYCLE_ENABLED and frozen_upper > frozen_lower > 0
+                else ()
+            ),
             (
                 f"{'底部' if side == 'LONG' else '顶部'}结构："
                 + (
@@ -1278,8 +1478,14 @@ def run_multi_timeframe_paper_cycle(
                 interval = position.active_interval
                 main = confirmed_context_at(symbol, interval, minute_open_time)
                 if main is not None:
-                    upper = float(main["bb_upper"])
-                    lower = float(main["bb_lower"])
+                    upper, frozen_middle, lower = _box_levels(
+                        state, symbol, interval, main
+                    )
+                    target_level = (
+                        position.entry_opposite_band
+                        if RANGE_LIFECYCLE_ENABLED and position.entry_opposite_band
+                        else upper if position.position_side == "LONG" else lower
+                    )
                     # 开仓所在的那一根收线后会带着整分钟的极值回到这里，而其中一部分
                     # 发生在开仓之前。跳过这一根的止损判定，从下一根开始正常判——
                     # 开仓当时的即时止损在 open_position 之后已经单独判过了。
@@ -1298,9 +1504,11 @@ def run_multi_timeframe_paper_cycle(
                         )
                     )
                     target_hit = (
-                        position.position_side == "LONG" and float(minute_bar["high"]) >= upper
+                        position.position_side == "LONG"
+                        and float(minute_bar["high"]) >= target_level
                     ) or (
-                        position.position_side == "SHORT" and float(minute_bar["low"]) <= lower
+                        position.position_side == "SHORT"
+                        and float(minute_bar["low"]) <= target_level
                     )
                     if stop_hit:
                         reason = (
@@ -1365,7 +1573,7 @@ def run_multi_timeframe_paper_cycle(
                             traded_this_minute = True
                     elif target_hit:
                         old_side = position.position_side
-                        target = upper if old_side == "LONG" else lower
+                        target = target_level
                         if position.structure_confirmed:
                             # 对侧轨命中反方向结构：不止盈反手，改为减仓50%、止损收紧到中轨，
                             # 只往结构确认的方向继续看，进入阶梯延续。
@@ -1381,7 +1589,7 @@ def run_multi_timeframe_paper_cycle(
                             )
                             # 止损收到开仓当时的中轨，而不是随后漂移过的当前中轨。
                             position.stop_price = (
-                                position.middle_reference_price or float(main["bb_middle"])
+                                position.middle_reference_price or frozen_middle
                             )
                             position.trend_ride_active = True
                             position.trend_ride_step_points = step
@@ -1405,10 +1613,17 @@ def run_multi_timeframe_paper_cycle(
                             traded_this_minute = True
                             # 箱体仍有效时，触及对侧轨即可原价反手；不等待主周期收线。
                             box_valid = (
-                                bool(main["box_candidate"])
-                                and not bool(main["breakout"])
-                                and state.box_active[symbol][interval]
+                                state.box_active[symbol][interval]
                                 and not state.blocked_after_stop[symbol][interval]
+                                and (
+                                    not RANGE_LIFECYCLE_ENABLED
+                                    or state.box_breakout_risk[symbol][interval]
+                                    <= parameters_by_market[symbol][interval].maximum_breakout_risk
+                                )
+                                and (
+                                    RANGE_LIFECYCLE_ENABLED
+                                    or (bool(main["box_candidate"]) and not bool(main["breakout"]))
+                                )
                                 and interval in ENTRY_INTERVAL_PRIORITY
                                 and not state.daily_blocked
                                 and not state.permanent_fuse
@@ -1430,7 +1645,7 @@ def run_multi_timeframe_paper_cycle(
                                 )
                                 and entry_reward_is_acceptable(
                                     symbol, interval, new_side, target,
-                                    float(main["bb_middle"]),
+                                    frozen_middle,
                                 )
                             ):
                                 open_position(
@@ -1438,12 +1653,12 @@ def run_multi_timeframe_paper_cycle(
                                     symbol,
                                     interval,
                                     target,
-                                    float(main["bb_middle"]),
+                                    frozen_middle,
                                     minute_open_time,
                                     "对侧轨止盈后触轨即时反手",
                                 )
                     else:
-                        middle_trigger = position.middle_trigger_price or float(main["bb_middle"])
+                        middle_trigger = position.middle_trigger_price or frozen_middle
                         middle_hit = (
                             position.position_side == "LONG"
                             and float(minute_bar["high"]) >= middle_trigger
@@ -1486,15 +1701,23 @@ def run_multi_timeframe_paper_cycle(
                         main is not None
                         and state.box_active[symbol][interval]
                         and not state.blocked_after_stop[symbol][interval]
-                        and bool(main["box_candidate"])
-                        and not bool(main["breakout"])
+                        and (
+                            not RANGE_LIFECYCLE_ENABLED
+                            or state.box_breakout_risk[symbol][interval]
+                            <= parameters_by_market[symbol][interval].maximum_breakout_risk
+                        )
+                        and (
+                            RANGE_LIFECYCLE_ENABLED
+                            or (bool(main["box_candidate"]) and not bool(main["breakout"]))
+                        )
                     ):
                         selected = (interval, main)
                         break
                 if selected is not None:
                     interval, main = selected
-                    upper = float(main["bb_upper"])
-                    lower = float(main["bb_lower"])
+                    upper, frozen_middle, lower = _box_levels(
+                        state, symbol, interval, main
+                    )
                     touched_upper = float(minute_bar["high"]) >= upper
                     touched_lower = float(minute_bar["low"]) <= lower
                     # 同一分钟同时穿过上下轨时无法还原先后顺序，保守跳过而不猜测方向。
@@ -1507,7 +1730,7 @@ def run_multi_timeframe_paper_cycle(
                             symbol, interval, side, minute_open_time
                         )
                         and entry_reward_is_acceptable(
-                            symbol, interval, side, reference, float(main["bb_middle"])
+                            symbol, interval, side, reference, frozen_middle
                         )
                     )
                     if is_provisional:
@@ -1533,7 +1756,7 @@ def run_multi_timeframe_paper_cycle(
                             symbol,
                             interval,
                             reference,
-                            float(main["bb_middle"]),
+                            frozen_middle,
                             minute_open_time,
                             f"{interval}震荡箱体触及{'上轨' if touched_upper else '下轨'}"
                             # 标出触发来源：不标的话事后分不清这一单是在途K线触发的
@@ -1609,8 +1832,8 @@ def run_multi_timeframe_paper_cycle(
                 state,
                 symbol,
                 interval,
-                box_candidate=bool(previous["box_candidate"]),
-                breakout=bool(previous["breakout"]),
+                context_row=previous,
+                parameters=parameters_by_market[symbol][interval],
             )
 
         # 止损后必须等对应周期的下一根K线完整收盘，再用该根的新布林带判断。
@@ -1655,8 +1878,8 @@ def run_multi_timeframe_paper_cycle(
                 state,
                 symbol,
                 interval,
-                box_candidate=bool(current["box_candidate"]),
-                breakout=bool(current["breakout"]),
+                context_row=current,
+                parameters=parameters_by_market[symbol][interval],
             )
         for symbol, interval, position in batch:
             state.last_bar_times[symbol][interval] = (

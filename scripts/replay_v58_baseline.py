@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -40,6 +41,25 @@ MAIN_INTERVALS = ("5m", "15m", "30m", "1h")
 WINDOW = 400
 OUTPUT_ROOT = Path("var/baseline")
 _ENGINE = create_engine(get_settings().database_url, pool_pre_ping=True)
+
+
+def _completed_trade_pnls(events: list) -> list[float]:
+    """从完全平仓事件中提取整笔交易净盈亏，避免把减仓事件误算成一笔交易。"""
+
+    completed: list[float] = []
+    for event in events:
+        if "剩余仓位：已全部了结" not in event.lines:
+            continue
+        pnl_line = next(
+            (line for line in event.lines if line.startswith("整笔累计净盈亏：")),
+            None,
+        )
+        if pnl_line is None:
+            continue
+        match = re.search(r"整笔累计净盈亏：([+-]?\d+(?:\.\d+)?)\s+USDT", pnl_line)
+        if match:
+            completed.append(float(match.group(1)))
+    return completed
 
 
 def load_bars(symbol: str, interval: str, venue: str, start, end) -> pd.DataFrame:
@@ -65,6 +85,8 @@ def load_bars(symbol: str, interval: str, venue: str, start, end) -> pd.DataFram
 def main() -> int:
     parser = argparse.ArgumentParser(description="V5.8 历史回放基线")
     parser.add_argument("--days", type=float, default=365.0)
+    parser.add_argument("--start", help="窗口起点 YYYY-MM-DD；给了就忽略 --days")
+    parser.add_argument("--end", help="窗口终点 YYYY-MM-DD")
     parser.add_argument("--venue", default="BINANCE_LIVE_PUBLIC")
     parser.add_argument("--symbols", default="BTC_USDT,ETH_USDT")
     parser.add_argument("--tag", default="v58-baseline")
@@ -73,8 +95,13 @@ def main() -> int:
                         help="覆盖入场周期，逗号分隔。V5.8 默认 15m,30m,1h——"
                              "5m 被排除在入场之外，只参与顶底结构判断。"
                              "传 5m,15m,30m,1h 就是放开 5m 交易。")
+    parser.add_argument("--regime", default=None,
+                        help="覆盖震荡判据阈值，形如 width=1.8,cross=3,growth=50,macd=off。"
+                             "默认值是从三段人工标注拟合的，研究时一律显式指定。")
     parser.add_argument("--regime-off", action="store_true",
                         help="关掉 V5.9 的震荡识别，复现 V5.8 的箱体判定，用于 A/B 对照")
+    parser.add_argument("--lifecycle-off", action="store_true",
+                        help="关闭V6固定箱体生命周期，用同一执行器回放V5.9动态轨基线")
     parser.add_argument("--disable-fuse", action="store_true",
                         help="关掉 8%% 最大回撤永久熔断。研究策略本身时要摘掉风控闸门——"
                              "否则量到的是闸门什么时候关，不是策略好不好。线上绝不能关。")
@@ -85,8 +112,9 @@ def main() -> int:
         text("SELECT MAX(open_time) t FROM market_bars b JOIN instruments i "
              "ON i.id=b.instrument_id WHERE i.venue=:v"),
         _ENGINE, params={"v": args.venue})["t"].iloc[0]
-    end = pd.Timestamp(latest)
-    start = end - timedelta(days=args.days)
+    end = pd.Timestamp(args.end) if args.end else pd.Timestamp(latest)
+    start = (pd.Timestamp(args.start) if args.start
+             else end - timedelta(days=args.days))
 
     main_bars = {s: {i: load_bars(s, i, args.venue, start, end) for i in MAIN_INTERVALS}
                  for s in symbols}
@@ -97,9 +125,25 @@ def main() -> int:
         print(f"缺少数据：{missing}", file=sys.stderr)
         return 2
 
+    if args.regime:
+        from gold_crypto_quant.strategy import bollinger_range as _b
+        kv = dict(p.split("=", 1) for p in args.regime.split(",") if p)
+        ov = {}
+        if "width" in kv:  ov["maximum_relative_width"] = float(kv["width"])
+        if "cross" in kv:  ov["minimum_middle_crossings"] = int(kv["cross"])
+        if "growth" in kv:
+            ov["maximum_width_growth"] = (1e9 if kv["growth"] == "off"
+                                          else float(kv["growth"]))
+        if "macd" in kv:
+            ov["maximum_macd_histogram"] = (1e9 if kv["macd"] == "off"
+                                            else float(kv["macd"]))
+        if "window" in kv: ov["regime_window"] = int(kv["window"])
+        _b.REGIME_OVERRIDE = ov
     if args.regime_off:
         from gold_crypto_quant.strategy import bollinger_range as br
         br.REGIME_FILTER_ENABLED = False
+    if args.lifecycle_off:
+        sim.RANGE_LIFECYCLE_ENABLED = False
     if args.disable_fuse:
         sim.MAX_DRAWDOWN_FUSE = 1.0
     if args.entry_intervals:
@@ -107,11 +151,14 @@ def main() -> int:
         sim.ENTRY_INTERVAL_PRIORITY = tuple(
             x.strip() for x in args.entry_intervals.split(",") if x.strip()
         )
-    print(f"窗口 {start:%Y-%m-%d} → {end:%Y-%m-%d}（{args.days:.0f} 天）  {args.venue}")
+    print(f"窗口 {start:%Y-%m-%d} → {end:%Y-%m-%d}"
+          f"（{(end-start).days} 天）  {args.venue}")
     print(f"最大回撤熔断：{'已关闭（仅研究用）' if args.disable_fuse else f'{sim.MAX_DRAWDOWN_FUSE:.0%}'}")
     print(f"入场周期：{'、'.join(sim.ENTRY_INTERVAL_PRIORITY)}")
     from gold_crypto_quant.strategy import bollinger_range as _br
-    print(f"震荡识别：{'V5.9 四条判据' if _br.REGIME_FILTER_ENABLED else 'V5.8 仅三轨走平'}")
+    print(f"震荡识别：{'V5.9 四条判据' if _br.REGIME_FILTER_ENABLED else 'V5.8 仅三轨走平'}"
+          + (f"  覆盖 {_br.REGIME_OVERRIDE}" if _br.REGIME_OVERRIDE else ""))
+    print(f"箱体边界：{'V6 固定边界与生命周期' if sim.RANGE_LIFECYCLE_ENABLED else 'V5.9 动态轨道'}")
     for s in symbols:
         counts = "  ".join(f"{i}:{len(b):,}" for i, b in main_bars[s].items())
         print(f"  {s}  1m:{len(micro[s]):,}  {counts}")
@@ -183,28 +230,50 @@ def main() -> int:
                   f"成交 {len(events)} 笔  {rate:.0f} 步/秒  剩约 {left:.0f} 分钟")
 
     elapsed = time.monotonic() - started
-    opens = [e for e in events if "开仓" in e.title]
-    closes = [e for e in events if "开仓" not in e.title]
+    # “触轨开仓后同一分钟止损”的标题也含“开仓”二字，不能用子串判断；
+    # 只有明确以“模拟开仓：”开头的事件才是一笔新交易。
+    opens = [e for e in events if e.title.startswith("模拟开仓：")]
+    closes = [e for e in events if not e.title.startswith("模拟开仓：")]
     reasons = Counter(e.title for e in closes)
-    wins = sum(1 for e in closes if getattr(e, "pnl", 0) and e.pnl > 0)
+    completed_pnls = _completed_trade_pnls(closes)
+    wins = sum(pnl > 0 for pnl in completed_pnls)
+    losses = sum(pnl < 0 for pnl in completed_pnls)
+    breakeven = len(completed_pnls) - wins - losses
 
     print(f"\n完成，耗时 {elapsed/60:.1f} 分钟")
     print(f"  最终权益 {equity:,.2f}U（初始 10,000）  收益 {equity/10_000-1:+.2%}")
     print(f"  开仓 {len(opens)} 笔，平仓事件 {len(closes)} 笔")
-    print(f"  平均每天 {len(opens)/args.days:.2f} 笔")
+    if completed_pnls:
+        profit_factor = (
+            sum(pnl for pnl in completed_pnls if pnl > 0)
+            / abs(sum(pnl for pnl in completed_pnls if pnl < 0))
+            if losses else float("inf")
+        )
+        print(
+            f"  完整交易 {len(completed_pnls)} 笔："
+            f"盈利 {wins} / 亏损 {losses} / 保本 {breakeven}，"
+            f"胜率 {wins / len(completed_pnls):.1%}，PF {profit_factor:.2f}"
+        )
+    actual_days = max((end - start).total_seconds() / 86_400, 1 / 24)
+    print(f"  平均每天 {len(opens)/actual_days:.2f} 笔")
     print("  出场原因：")
     for reason, n in reasons.most_common(10):
         print(f"    {n:>5} 次  {reason}")
 
     payload = {
         "tag": args.tag, "venue": args.venue, "symbols": list(symbols),
-        "window": {"start": str(start), "end": str(end), "days": args.days},
+        "window": {"start": str(start), "end": str(end), "days": (end-start).days},
         "strategy_version": sim.MULTI_ROTATION_STRATEGY_VERSION,
         "max_drawdown_fuse": sim.MAX_DRAWDOWN_FUSE,
         "entry_intervals": list(sim.ENTRY_INTERVAL_PRIORITY),
         "regime_filter": _br.REGIME_FILTER_ENABLED,
+        "range_lifecycle": sim.RANGE_LIFECYCLE_ENABLED,
+        "regime_override": _br.REGIME_OVERRIDE,
         "final_equity": equity, "total_return": equity / 10_000 - 1,
-        "opens": len(opens), "closes": len(closes), "wins": wins,
+        "opens": len(opens), "closes": len(closes),
+        "completed_trades": len(completed_pnls),
+        "wins": wins, "losses": losses, "breakeven": breakeven,
+        "completed_trade_pnls": completed_pnls,
         "exit_reasons": dict(reasons),
         "elapsed_minutes": round(elapsed / 60, 2),
         # RotationPaperEvent 的字段是 event_key/title/lines/severity。

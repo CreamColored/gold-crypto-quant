@@ -1,18 +1,27 @@
-"""15分钟识别震荡、5分钟触轨确认的布林带波段策略。"""
+"""同周期识别与触轨的布林带箱体策略，并提供V6生命周期证据。"""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 
-from gold_crypto_quant.risk.indicators import average_directional_index, average_true_range
+from gold_crypto_quant.risk.indicators import (
+    average_directional_index,
+    average_true_range,
+    choppiness_index,
+)
 from gold_crypto_quant.strategy.live_signals import NextBarSignalDecision, SignalAction
 
 
 # 模块级总开关。回放做 A/B 对照时设 False 即可复现 V5.8 的箱体判定，
 # 不必改参数构造链。线上保持 True。
 REGIME_FILTER_ENABLED = True
+
+# 震荡判据阈值的运行时覆盖。为空则用 parameters_for_same_timeframe 的默认值。
+# 存在的意义：V5.9 的默认阈值是从三段人工标注拟合出来的，不能作为研究起点；
+# 网格扫描时由训练集自行选择，覆盖走这里，不改默认值。
+REGIME_OVERRIDE: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +30,6 @@ class BollingerRangeParameters:
 
     bollinger_period: int = 20
     bollinger_std: float = 2.0
-    regime_window: int = 6
     maximum_band_drift: float = 2.5
     maximum_bandwidth_growth: float = 0.10
     adx_period: int = 14
@@ -61,6 +69,11 @@ class BollingerRangeParameters:
     maximum_macd_histogram: float = 1.2
     """MACD 柱体绝对值均值上限（相对价格的千分比）。动能有方向性积累就不是震荡。"""
 
+    lifecycle_confirmation_bars: int = 2
+    lifecycle_maximum_age_bars: int = 96
+    minimum_range_evidence: float = 0.55
+    maximum_breakout_risk: float = 0.50
+
     def __post_init__(self) -> None:
         if self.bollinger_period < 2 or self.regime_window < 2:
             raise ValueError("Bollinger period and regime window must be at least two")
@@ -88,6 +101,12 @@ class BollingerRangeParameters:
             raise ValueError("中轨穿越次数不能为负")
         if self.maximum_macd_histogram <= 0:
             raise ValueError("柱体上限必须为正")
+        if self.lifecycle_confirmation_bars < 1 or self.lifecycle_maximum_age_bars < 2:
+            raise ValueError("箱体生命周期参数无效")
+        if not 0 <= self.minimum_range_evidence <= 1:
+            raise ValueError("震荡证据分数必须在0到1之间")
+        if not 0 <= self.maximum_breakout_risk <= 1:
+            raise ValueError("突破风险分数必须在0到1之间")
 
     def to_dict(self) -> dict[str, object]:
         """转换为可写入策略运行和准入记录的普通字典。"""
@@ -302,19 +321,21 @@ def build_rotation_box_context(
         & ~breakout
     )
 
+    # V5.9和V6共用的归一化特征先统一计算；关闭V5.9硬过滤时，V6评分仍可工作。
+    window = parameters.regime_window
+    middle = indicators["bb_middle"]
+    relative_width = indicators["bb_width"] / middle * 100.0
+    side = np.sign(bars["close"] - middle)
+    crossings = (side != side.shift(1)).rolling(window).sum()
+
     # ---- V5.9 震荡识别 ----
     # V5.8 只判"三轨走平"，实测在人工标注的三段行情上精确率只有 58%（15m）——
     # 它认定的箱体里 42% 是单边行情，策略在那里做高抛低吸，
     # 一年回放里 47% 的交易死于固定保护止损、亏掉 16,062U。
     # 这四条来自标注数据里区分度最强的四个特征。
     if parameters.regime_enabled and REGIME_FILTER_ENABLED:
-        window = parameters.regime_window
-        middle = indicators["bb_middle"]
         # 带宽相对中轨，做成百分比才能跨品种跨价格比较。
-        relative_width = indicators["bb_width"] / middle * 100.0
         # 中轨穿越：收盘价相对中轨的符号翻转次数。
-        side = np.sign(bars["close"] - middle)
-        crossings = (side != side.shift(1)).rolling(window).sum()
         # 带宽变化：正为开口（单边展开），负为收口。
         width_growth = (
             relative_width.diff(window) / relative_width.shift(window).replace(0.0, pd.NA) * 100.0
@@ -339,6 +360,31 @@ def build_rotation_box_context(
 
     result["box_candidate"] = box_candidate.fillna(False)
     result["breakout"] = breakout.astype(bool)
+    result["close"] = bars["close"].astype(float)
+    # V6候选特征只负责提供可审计分数；是否冻结、老化或作废由运行时生命周期管理。
+    chop = choppiness_index(bars, parameters.adx_period)
+    bbw_percentile = relative_width.rolling(252).rank(pct=True) * 100.0
+    short_width_growth = relative_width / relative_width.shift(3).replace(0.0, pd.NA) - 1.0
+    crossing_score = (crossings / 4.0).clip(0.0, 1.0)
+    chop_score = ((chop - 38.2) / (61.8 - 38.2)).clip(0.0, 1.0)
+    weak_trend_score = ((25.0 - indicators["adx"]) / 10.0).clip(0.0, 1.0)
+    range_evidence = (
+        flat.astype(float) * 0.35
+        + crossing_score * 0.25
+        + chop_score * 0.20
+        + weak_trend_score * 0.20
+    )
+    breakout_risk = (
+        (bbw_percentile <= 10.0).astype(float) * 0.25
+        + (short_width_growth > 0.20).astype(float) * 0.30
+        + (indicators["adx"] >= 25.0).astype(float) * 0.25
+        + (indicators["volume_ratio"] > 1.5).astype(float) * 0.20
+    ).clip(0.0, 1.0)
+    result["choppiness"] = chop
+    result["bbw_percentile"] = bbw_percentile
+    result["short_width_growth"] = short_width_growth
+    result["range_evidence_score"] = range_evidence
+    result["breakout_risk_score"] = breakout_risk
     return result
 
 
@@ -346,24 +392,29 @@ def parameters_for_same_timeframe(interval: str) -> BollingerRangeParameters:
     """返回各同周期模式的三轨连续走平点数阈值。"""
     # 震荡判据的阈值按周期分别拟合。周期越大带宽天然越宽，用同一个数会
     # 让大周期永远不合格。1h 的人工标注只有 9 根、拟合不可靠，沿用 30m 的值。
+    def _apply(base: "BollingerRangeParameters") -> "BollingerRangeParameters":
+        if not REGIME_OVERRIDE:
+            return base
+        return replace(base, **REGIME_OVERRIDE)
+
     if interval == "15m":
-        return BollingerRangeParameters(
+        return _apply(BollingerRangeParameters(
             maximum_band_drift=2.5,
             maximum_relative_width=1.2,
             maximum_macd_histogram=1.2,
-        )
+        ))
     if interval == "5m":
-        return BollingerRangeParameters(
+        return _apply(BollingerRangeParameters(
             maximum_band_drift=1.0,
             maximum_relative_width=0.9,
             maximum_macd_histogram=0.9,
-        )
+        ))
     if interval in {"30m", "1h"}:
-        return BollingerRangeParameters(
+        return _apply(BollingerRangeParameters(
             maximum_band_drift=3.0,
             maximum_relative_width=1.8,
             maximum_macd_histogram=1.7,
-        )
+        ))
     raise ValueError("same-timeframe Bollinger strategy supports 5m, 15m, 30m and 1h")
 
 

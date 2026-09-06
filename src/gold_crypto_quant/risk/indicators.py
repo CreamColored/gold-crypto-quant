@@ -1,4 +1,6 @@
-"""风险指标计算，目前提供 Wilder ATR。"""
+"""风险和市场状态指标计算。"""
+
+import numpy as np
 
 import pandas as pd
 
@@ -65,3 +67,26 @@ def average_directional_index(bars: pd.DataFrame, period: int = 14) -> pd.Series
     directional_index = 100.0 * (positive_di - negative_di).abs() / denominator
     # ADX是DX的第二次Wilder平滑，因此需要比ATR更长的预热区间。
     return directional_index.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
+def choppiness_index(bars: pd.DataFrame, period: int = 14) -> pd.Series:
+    """计算无方向的 CHOP；值越高表示窗口内路径相对净位移越曲折。
+
+    公式与 TradingView 内置 CHOP 一致：窗口真实波幅之和除以窗口最高最低差，
+    再用以 ``period`` 为底的对数归一到 0～100。只读取当前及过去K线。
+    """
+    if period < 2:
+        raise ValueError("period must be at least 2")
+    missing = {"high", "low", "close"}.difference(bars.columns)
+    if missing:
+        raise ValueError(f"bars missing required columns: {sorted(missing)}")
+    high = pd.to_numeric(bars["high"], errors="raise").astype(float)
+    low = pd.to_numeric(bars["low"], errors="raise").astype(float)
+    close = pd.to_numeric(bars["close"], errors="raise").astype(float)
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1
+    ).max(axis=1)
+    travelled = true_range.rolling(period).sum()
+    displacement = (high.rolling(period).max() - low.rolling(period).min()).replace(0.0, np.nan)
+    return 100.0 * np.log10(travelled / displacement) / np.log10(period)
