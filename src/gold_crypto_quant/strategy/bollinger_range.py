@@ -21,6 +21,11 @@ REGIME_FILTER_ENABLED = True
 # 震荡判据阈值的运行时覆盖。为空则用 parameters_for_same_timeframe 的默认值。
 # 存在的意义：V5.9 的默认阈值是从三段人工标注拟合出来的，不能作为研究起点；
 # 网格扫描时由训练集自行选择，覆盖走这里，不改默认值。
+# 学习出来的震荡识别器。默认 None＝走原来的规则判据，行为完全不变。
+# 研究时注入 {(品种, 周期): 布尔Series}，**整体替换**规则判据，而不是再加一层过滤——
+# 加一层只能让箱体更少，替换才能测出"换一批箱体"到底好不好。
+# 保留 ~breakout：连续两根收盘出轨是客观的结构事实，不属于识别启发式。
+BOX_CANDIDATE_OVERRIDE: dict | None = None
 REGIME_OVERRIDE: dict | None = None
 
 
@@ -291,6 +296,7 @@ def build_same_timeframe_entry_context(
 def build_rotation_box_context(
     bars: pd.DataFrame,
     parameters: BollingerRangeParameters | None = None,
+    market_key: tuple[str, str] | None = None,
 ) -> pd.DataFrame:
     """计算15分钟轨道轮转所需的箱体、突破和固定轨道。
 
@@ -358,6 +364,12 @@ def build_rotation_box_context(
         result["width_growth"] = width_growth
         result["histogram_scale"] = histogram_scale
 
+    if BOX_CANDIDATE_OVERRIDE is not None and market_key is not None:
+        learned = BOX_CANDIDATE_OVERRIDE.get(market_key)
+        if learned is not None:
+            # 整体替换识别判据。对不齐的时间点按 False 处理——宁可漏掉，
+            # 不能因为查不到分数就默认放行。
+            box_candidate = learned.reindex(bars.index).fillna(False).astype(bool) & ~breakout
     result["box_candidate"] = box_candidate.fillna(False)
     result["breakout"] = breakout.astype(bool)
     result["close"] = bars["close"].astype(float)

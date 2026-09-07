@@ -102,6 +102,9 @@ def main() -> int:
                         help="关掉 V5.9 的震荡识别，复现 V5.8 的箱体判定，用于 A/B 对照")
     parser.add_argument("--lifecycle-off", action="store_true",
                         help="关闭V6固定箱体生命周期，用同一执行器回放V5.9动态轨基线")
+    parser.add_argument("--box-model", default=None,
+                        help="学习出来的震荡识别器（build_range_identifier.py 生成），"
+                             "整体替换 box_candidate 规则判据")
     parser.add_argument("--ml-gate", default=None,
                         help="ML入场闸门评分表路径（build_ml_entry_gate.py 生成）")
     parser.add_argument("--disable-fuse", action="store_true",
@@ -146,6 +149,22 @@ def main() -> int:
         br.REGIME_FILTER_ENABLED = False
     if args.lifecycle_off:
         sim.RANGE_LIFECYCLE_ENABLED = False
+    if args.box_model:
+        import pickle
+
+        from gold_crypto_quant.strategy import bollinger_range as _br
+
+        with open(args.box_model, "rb") as handle:
+            box_payload = pickle.load(handle)
+        # 不要剥时区！回放器的K线索引是带UTC的，剥掉会让 reindex 全部对不上、
+        # 静默变成"一根箱体都没有"，看起来像识别器太严，实际是加载错了。
+        _br.BOX_CANDIDATE_OVERRIDE = {
+            key: (table.tz_localize("UTC") if table.index.tz is None else table)
+            for key, table in box_payload["tables"].items()
+        }
+        print(f"震荡识别：学习识别器（训练截止 {box_payload['train_end']}，"
+              f"前瞻{box_payload['horizon']}根）已整体替换规则判据")
+
     if args.ml_gate:
         import pickle
 

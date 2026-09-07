@@ -938,7 +938,7 @@ def run_multi_timeframe_paper_cycle(
                 ("box", symbol, interval, _frame_fingerprint(bars),
                  repr(parameters_by_market[symbol][interval])),
                 lambda bars=bars, symbol=symbol, interval=interval: build_rotation_box_context(
-                    bars, parameters_by_market[symbol][interval]
+                    bars, parameters_by_market[symbol][interval], (symbol, interval)
                 ),
             )
             for interval, bars in symbol_bars.items()
