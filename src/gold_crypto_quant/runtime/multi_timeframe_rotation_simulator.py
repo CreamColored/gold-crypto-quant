@@ -22,6 +22,11 @@ from gold_crypto_quant.strategy.bollinger_range import (
 MULTI_ROTATION_STRATEGY_VERSION = "6.0.0"
 # 研究回放可临时关闭，线上V6保持开启；同一执行器才能做公平A/B。
 RANGE_LIFECYCLE_ENABLED = True
+# 机器学习入场闸门。默认 None＝不启用，行为与 V6 完全一致。
+# 研究回放注入一个 (symbol, interval, side, minute_open_time) -> bool 的可调用对象；
+# 它只能**减少**开仓，不能新增，也不改任何出场、减仓、反手和风控逻辑。
+# 这样 A/B 的唯一变量就是"这一笔该不该开"，不会把出场改动的效果算到识别器头上。
+ENTRY_SCORE_GATE = None
 INTERVAL_PRIORITY = ("5m", "15m", "30m", "1h")
 # 5分钟不再直接触发交易，但仍留在 INTERVAL_PRIORITY 里——顶底结构要查全部七个周期，
 # 把它从那里拿掉会连结构判定一起丢掉。已经持有的5m仓位照常按原周期管理到结束。
@@ -1647,6 +1652,14 @@ def run_multi_timeframe_paper_cycle(
                                     symbol, interval, new_side, target,
                                     frozen_middle,
                                 )
+                                # 反手同样是一次新开仓，必须走同一个闸门，
+                                # 否则 A/B 里会漏掉一整类入场，变量就不唯一了。
+                                and (
+                                    ENTRY_SCORE_GATE is None
+                                    or ENTRY_SCORE_GATE(
+                                        symbol, interval, new_side, minute_open_time
+                                    )
+                                )
                             ):
                                 open_position(
                                     new_side,
@@ -1731,6 +1744,10 @@ def run_multi_timeframe_paper_cycle(
                         )
                         and entry_reward_is_acceptable(
                             symbol, interval, side, reference, frozen_middle
+                        )
+                        and (
+                            ENTRY_SCORE_GATE is None
+                            or ENTRY_SCORE_GATE(symbol, interval, side, minute_open_time)
                         )
                     )
                     if is_provisional:

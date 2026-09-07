@@ -102,6 +102,8 @@ def main() -> int:
                         help="关掉 V5.9 的震荡识别，复现 V5.8 的箱体判定，用于 A/B 对照")
     parser.add_argument("--lifecycle-off", action="store_true",
                         help="关闭V6固定箱体生命周期，用同一执行器回放V5.9动态轨基线")
+    parser.add_argument("--ml-gate", default=None,
+                        help="ML入场闸门评分表路径（build_ml_entry_gate.py 生成）")
     parser.add_argument("--disable-fuse", action="store_true",
                         help="关掉 8%% 最大回撤永久熔断。研究策略本身时要摘掉风控闸门——"
                              "否则量到的是闸门什么时候关，不是策略好不好。线上绝不能关。")
@@ -144,6 +146,39 @@ def main() -> int:
         br.REGIME_FILTER_ENABLED = False
     if args.lifecycle_off:
         sim.RANGE_LIFECYCLE_ENABLED = False
+    if args.ml_gate:
+        import pickle
+
+        with open(args.ml_gate, "rb") as handle:
+            gate_payload = pickle.load(handle)
+        gate_tables = {
+            sym: (
+                cfg["scores"].tz_localize(None)
+                if cfg["scores"].index.tz is not None
+                else cfg["scores"],
+                cfg["threshold"],
+            )
+            for sym, cfg in gate_payload["symbols"].items()
+        }
+
+        def _ml_gate(symbol, interval, side, minute_open_time):
+            """按分钟所在的15m K线查分。查不到分数一律拒绝（失败关闭）。"""
+            entry = gate_tables.get(symbol)
+            if entry is None:
+                return False
+            table, threshold = entry
+            bar_open = pd.Timestamp(minute_open_time).tz_localize(None).floor("15min")
+            try:
+                return float(table.at[bar_open, side]) >= threshold
+            except (KeyError, ValueError):
+                return False
+
+        sim.ENTRY_SCORE_GATE = _ml_gate
+        print(f"ML入场闸门：已启用（训练截止 {gate_payload['train_end']}，"
+              f"前{(1 - gate_payload['top']) * 100:.0f}%）")
+    else:
+        sim.ENTRY_SCORE_GATE = None
+
     if args.disable_fuse:
         sim.MAX_DRAWDOWN_FUSE = 1.0
     if args.entry_intervals:
