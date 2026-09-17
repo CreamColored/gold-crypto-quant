@@ -9,8 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """从默认值和本地 ``.env`` 加载配置。
 
-    环境变量优先于代码默认值。``.env`` 在本仓库里是被 Git 跟踪的——私有仓库，凭据
-    集中在这一个文件里，不额外分层。
+    环境变量优先于代码默认值。``.env`` 不纳入版本库，新环境从 ``.env.example``
+    复制后填写；示例文件只放键名与安全的示例值，新增字段时两边同步。
     """
 
     # Pydantic Settings 会自动读取项目根目录的 .env，并忽略暂未使用的扩展字段。

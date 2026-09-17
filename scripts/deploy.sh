@@ -47,7 +47,13 @@ fi
 # ---- 3. 远端更新 ----
 say "拉取代码"
 BEFORE=$(ssh "$HOST" "cd $REMOTE_DIR && git rev-parse HEAD")
-ssh "$HOST" "cd $REMOTE_DIR && git pull --ff-only origin main"
+# .env 已不纳入版本库。上游删除被跟踪文件时 git pull 会把服务器上那份也删掉，
+# 本地有修改时 pull 又会直接中止——两种结局都不能接受。所以先把真实的 .env
+# 备份到仓库外，丢弃它的跟踪态改动让 pull 能通过，拉完无条件还原。
+# 首次拉到"取消跟踪"那个提交之后 .env 就是被忽略的普通文件，这几步变成空操作。
+ssh "$HOST" "cd $REMOTE_DIR && cp -p .env /root/.gcq-env.deploy-bak \
+  && { git checkout -- .env 2>/dev/null || true; } \
+  && git pull --ff-only origin main; rc=\$?; cp -p /root/.gcq-env.deploy-bak .env; exit \$rc"
 AFTER=$(ssh "$HOST" "cd $REMOTE_DIR && git rev-parse HEAD")
 [[ "$BEFORE" == "$AFTER" ]] && say "代码没变化，跳过重启" && exit 0
 
